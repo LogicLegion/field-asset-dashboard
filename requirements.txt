@@ -1,0 +1,9 @@
+flask
+python-dotenv
+requests
+markdown
+bleach
+PyPDF2
+Pillow
+pytesseract
+gunicorn
