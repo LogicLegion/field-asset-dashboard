@@ -77,7 +77,7 @@ total_tokens_used = 0
 total_cost_usd = 0.0
 
 # ============================================
-# HTML TEMPLATE - GENERIC FIELD ASSET DASHBOARD
+# HTML TEMPLATE - FIXED VERSION
 # ============================================
 
 HTML_TEMPLATE = """
@@ -239,6 +239,7 @@ HTML_TEMPLATE = """
             cursor: pointer;
             display: inline-block;
             transition: 0.2s;
+            min-width: 200px;
         }
         
         body.dark-mode .upload-button {
@@ -248,6 +249,19 @@ HTML_TEMPLATE = """
         
         .upload-button:hover { background: #e0e7ff; border-color: #4a5b6e; }
         body.dark-mode .upload-button:hover { background: #1a2332; border-color: #58a6ff; }
+        
+        .upload-button input[type="file"] {
+            display: block;
+            margin: 10px auto 0 auto;
+            font-size: 14px;
+            cursor: pointer;
+            background: transparent;
+            border: none;
+        }
+        
+        body.dark-mode .upload-button input[type="file"] {
+            color: #c9d1d9;
+        }
         
         .ops-links {
             display: flex;
@@ -305,9 +319,6 @@ HTML_TEMPLATE = """
         
         .mode-btn:hover:not(.active) { background: #cbd5e1; }
         body.dark-mode .mode-btn:hover:not(.active) { background: #30363d; }
-        
-        .dashboard.field-mode .office-only { display: none !important; }
-        .dashboard.office-mode .field-only { display: none !important; }
         
         .kpi-grid {
             display: grid;
@@ -674,6 +685,17 @@ HTML_TEMPLATE = """
         body.dark-mode .call-btn { background: #30363d; color: #c9d1d9; }
         .notes-icon { cursor: pointer; margin-right: 6px; color: #3b82f6; }
         
+        .file-name-display {
+            margin-top: 10px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #1e3a5f;
+        }
+        
+        body.dark-mode .file-name-display {
+            color: #58a6ff;
+        }
+        
         @media (max-width: 768px) {
             .hero-header { flex-direction: column; text-align: center; }
             .map-wrapper { flex-direction: column; }
@@ -704,17 +726,17 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <input type="file" id="csvFile" accept=".csv" style="display:none;" onchange="handleFileUpload(event)">
-
         <!-- Upload card -->
         <div id="uploadCard" class="unified-card">
             <div class="card-section">
                 <div class="section-title"><i class="fas fa-cloud-upload-alt"></i> UPLOAD ASSET DATA</div>
                 <div class="upload-instruction">Click to select your field asset CSV file</div>
-                <div class="upload-button" id="uploadBtn" onclick="document.getElementById('csvFile').click()" style="cursor:pointer;">
-                    <i class="fas fa-file-csv"></i><br>
+                <div class="upload-button" id="uploadBtn">
+                    <i class="fas fa-file-csv" style="font-size: 24px;"></i><br>
                     <strong>Choose File</strong><br>
                     <small>or drag & drop</small>
+                    <input type="file" id="csvFile" accept=".csv" onchange="handleFileUpload(event)">
+                    <div id="fileNameDisplay" class="file-name-display"></div>
                 </div>
             </div>
             <div class="card-section">
@@ -830,4 +852,278 @@ HTML_TEMPLATE = """
             <div class="map-container tech-detail">
                 <div style="font-weight:700; margin-bottom:12px;"><i class="fas fa-map-pin"></i> Asset Location Map</div>
                 <div class="map-wrapper">
-                    <div class="map-panel"><div id="map" style="height:400px; border-radius
+                    <div class="map-panel"><div id="map" style="height:400px; border-radius:16px; background:#eef2f8;"></div></div>
+                    <div class="selection-panel" id="selectionPanel">
+                        <h4>📌 Selected Assets</h4>
+                        <div id="selectedAssetsList">Click map markers to select</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast">✅ File uploaded successfully!</div>
+
+    <script>
+        // ============================================
+        // FILE UPLOAD - FIXED
+        // ============================================
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            // Show file name
+            document.getElementById('fileNameDisplay').textContent = '📄 ' + file.name;
+            
+            // Read the file
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const data = e.target.result;
+                
+                // Parse CSV
+                const rows = data.split('\\n').map(row => row.split(','));
+                if (rows.length < 2) {
+                    alert('The CSV file appears to be empty or invalid.');
+                    return;
+                }
+                
+                // Store data
+                window.csvData = rows;
+                
+                // Hide upload card, show dashboard
+                document.getElementById('uploadCard').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+                document.getElementById('actionButtons').style.display = 'flex';
+                
+                // Show toast
+                showToast('✅ ' + file.name + ' uploaded successfully!');
+                
+                // Render dashboard
+                renderDashboard(rows);
+            };
+            reader.readAsText(file);
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.display = 'block';
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+
+        // ============================================
+        // DASHBOARD RENDER
+        // ============================================
+        function renderDashboard(data) {
+            console.log('Rendering dashboard with', data.length, 'rows');
+            // This is where you'd render your dashboard
+            // For now, just show a message
+            document.getElementById('dataTimestamp').textContent = '📊 Data loaded: ' + new Date().toLocaleString();
+        }
+
+        // ============================================
+        // MODE TOGGLE
+        // ============================================
+        function setMode(mode) {
+            const dashboard = document.getElementById('dashboard');
+            const fieldBtn = document.getElementById('fieldModeBtn');
+            const officeBtn = document.getElementById('officeModeBtn');
+            
+            if (mode === 'field') {
+                dashboard.classList.remove('office-mode');
+                dashboard.classList.add('field-mode');
+                fieldBtn.classList.add('active');
+                officeBtn.classList.remove('active');
+            } else {
+                dashboard.classList.remove('field-mode');
+                dashboard.classList.add('office-mode');
+                officeBtn.classList.add('active');
+                fieldBtn.classList.remove('active');
+            }
+        }
+
+        // ============================================
+        // INIT
+        // ============================================
+        console.log('Dashboard ready. Upload a CSV file to begin.');
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def home():
+    if 'session_id' not in session:
+        session['session_id'] = f"user_{int(time.time())}_{os.urandom(4).hex()}"
+    return render_template_string(
+        HTML_TEMPLATE,
+        bot_name=BOT_NAME,
+        session_id=session['session_id']
+    )
+
+@app.route('/ping')
+def ping():
+    return jsonify({'status': 'ok', 'bot_name': BOT_NAME, 'fusion': 'Cypher Fusion (Non-US)'})
+
+@app.route('/extract-image', methods=['POST'])
+def extract_image():
+    try:
+        data = request.json
+        file_content = data.get('file', '')
+        file_name = data.get('name', 'image.jpg')
+        result = extract_text_from_image(file_content, file_name)
+        return jsonify({'text': result})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/extract-pdf', methods=['POST'])
+def extract_pdf():
+    try:
+        data = request.json
+        file_content = data.get('file', '')
+        file_name = data.get('name', 'file.pdf')
+        pdf_bytes = base64.b64decode(file_content)
+        from io import BytesIO
+        pdf_file = BytesIO(pdf_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        if not text.strip():
+            text = "No text could be extracted from this PDF."
+        return jsonify({'text': text})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    global total_tokens_used, total_cost_usd
+    data = request.json
+    user_message = data.get('message', '').strip()
+    session_id = data.get('session', session.get('session_id', 'default'))
+    personality = data.get('personality', 'default')
+    web_search = data.get('web_search', True)
+    fusion_preset = data.get('fusion_preset', 'cypher_pro')
+    file_content = data.get('file_content', '')
+    file_name = data.get('file_name', '')
+
+    if not user_message:
+        return jsonify({'error': 'No case presented.'}), 400
+
+    if session_id not in chat_histories:
+        chat_histories[session_id] = []
+
+    history = chat_histories[session_id]
+    personality_prompt = PERSONALITIES.get(personality, PERSONALITIES['default'])
+    
+    if file_content:
+        personality_prompt += f"\n\nThe user submitted evidence named '{file_name}' with this content:\n\n{file_content[:6000]}\n\nUse this as evidence. If it's irrelevant, state that plainly."
+
+    messages = [
+        {"role": "system", "content": personality_prompt},
+        {"role": "system", "content": "You are Cypher. Deliver one definitive ruling. No hedging. No check again. Just the verdict."},
+        {"role": "system", "content": "If you're uncertain, state your confidence as a percentage. If you don't know, say I don't know."}
+    ]
+    messages.extend(history[-6:])
+    messages.append({"role": "user", "content": user_message})
+
+    preset = CYPHER_PRESETS.get(fusion_preset, CYPHER_PRESETS["cypher_pro"])
+    
+    try:
+        payload = {
+            "model": "openrouter/fusion",
+            "plugins": [{
+                "id": "fusion",
+                "analysis_models": preset["panel"],
+                "model": preset["judge"]
+            }],
+            "messages": messages,
+            "temperature": 0.15,
+            "max_tokens": 500,
+            "top_p": 0.85,
+        }
+        if web_search:
+            payload["tools"] = [{"type": "openrouter:web_search"}]
+
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {YOUR_API_KEY}",
+                "Content-Type": "application/json",
+                "X-OpenRouter-Cache": "true",
+            },
+            json=payload,
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            error_msg = response.json().get('error', {}).get('message', 'API error')
+            return jsonify({'error': f'Cypher Fusion Error: {error_msg}'})
+
+        result = response.json()
+        if not result or 'choices' not in result or not result['choices']:
+            return jsonify({'error': 'Cypher gave no ruling.'})
+        
+        bot_reply = result['choices'][0]['message']['content']
+        if not bot_reply:
+            return jsonify({'error': 'No verdict generated.'})
+        
+        bot_reply = clean_claude_hedging(bot_reply)
+        if not bot_reply.startswith(("Verdict:", "Ruling:", "Confidence:", "I don't know")):
+            bot_reply = f"Ruling: {bot_reply}"
+        
+        html_reply = markdown.markdown(bot_reply, extensions=['tables', 'fenced_code'])
+        html_reply = bleach.clean(html_reply, strip=True)
+        
+        usage = result.get('usage', {})
+        total_tokens_used += usage.get('total_tokens', 0)
+        total_cost_usd += 0.0001
+        
+        message_id = f"{session_id}_{int(time.time())}_{len(history)}"
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": bot_reply})
+        if len(history) > 12:
+            history = history[-12:]
+            chat_histories[session_id] = history
+        
+        preset_name = preset["name"].split(" ")[0] + " " + preset["name"].split(" ")[1] if len(preset["name"].split(" ")) > 1 else preset["name"]
+        return jsonify({
+            'reply': bot_reply,
+            'html_reply': html_reply,
+            'message_id': message_id,
+            'preset_used': preset_name,
+            'score': preset["score"]
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Cypher Fusion timed out.'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/feedback', methods=['POST'])
+def feedback():
+    try:
+        data = request.json
+        message_id = data.get('message_id')
+        value = data.get('value')
+        if not message_id or value not in [1, -1]:
+            return jsonify({'error': 'Invalid feedback'}), 400
+        if 'feedback_data' not in chat_histories:
+            chat_histories['feedback_data'] = {}
+        chat_histories['feedback_data'][message_id] = value
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/clear', methods=['POST'])
+def clear():
+    session_id = request.json.get('session', session.get('session_id', 'default'))
+    if session_id in chat_histories:
+        chat_histories[session_id] = []
+    return jsonify({'status': 'ok'})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, threaded=True)
