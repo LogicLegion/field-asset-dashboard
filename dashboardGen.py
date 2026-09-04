@@ -244,9 +244,9 @@ HTML_TEMPLATE = """
             <div class="creator">Built by <strong>You</strong> — Fleet Intelligence Platform</div>
         </div>
         <div class="hero-right">
-            <button class="hero-btn" onclick="document.getElementById('csvFile').click()"><i class="fas fa-upload"></i> Upload CSV</button>
-            <button class="hero-btn primary" onclick="takeScreenshot()"><i class="fas fa-camera"></i> Screenshot</button>
-            <button class="hero-btn primary" id="downloadPdfBtn"><i class="fas fa-file-pdf"></i> Report</button>
+            <button class="hero-btn" id="uploadBtn"><i class="fas fa-upload"></i> Upload CSV</button>
+            <button class="hero-btn primary" id="screenshotBtn"><i class="fas fa-camera"></i> Screenshot</button>
+            <button class="hero-btn primary" id="reportBtn"><i class="fas fa-file-pdf"></i> Report</button>
         </div>
     </div>
 
@@ -256,7 +256,7 @@ HTML_TEMPLATE = """
     <div class="upload-card" id="uploadCard">
         <h2>📊 Upload Your Fleet Data</h2>
         <p style="color:#64748b; margin-bottom:16px;">Upload a CSV file with your asset data</p>
-        <div class="upload-button" id="uploadBtn">
+        <div class="upload-button" id="uploadBtn2">
             <i class="fas fa-file-csv" style="font-size:2rem;"></i><br>
             <strong>Choose File</strong><br>
             <small>or drag & drop</small>
@@ -621,47 +621,62 @@ HTML_TEMPLATE = """
         });
     }
 
-    // ===== EVENT LISTENERS =====
-    document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('csvFile').click());
+    // ============================================================
+    // FILE UPLOAD - FIXED
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', function() {
 
-    document.getElementById('csvFile').addEventListener('change', function(e) {
-        if (!e.target.files || !e.target.files[0]) return;
-        const file = e.target.files[0];
-        document.getElementById('fileStatus').textContent = 'Loading: ' + file.name;
-        if (!file.name.endsWith('.csv')) { showToast('Please upload a CSV file'); return; }
-        const reader = new FileReader();
-        reader.onload = function(ev) {
-            if (parseCSV(ev.target.result)) {
-                document.getElementById('uploadCard').style.display = 'none';
-                document.getElementById('dashboard').style.display = 'block';
-                document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
-                populateFilters();
-                setupSorting();
-                renderAll();
-                showToast('Loaded ' + allData.length + ' assets');
-            } else showToast('Invalid CSV format');
-        };
-        reader.readAsText(file);
+        // Both upload buttons trigger the same hidden file input
+        document.getElementById('uploadBtn').addEventListener('click', function() {
+            document.getElementById('csvFile').click();
+        });
+
+        document.getElementById('uploadBtn2').addEventListener('click', function() {
+            document.getElementById('csvFile').click();
+        });
+
+        document.getElementById('csvFile').addEventListener('change', function(e) {
+            if (!e.target.files || !e.target.files[0]) return;
+            const file = e.target.files[0];
+            document.getElementById('fileStatus').textContent = 'Loading: ' + file.name;
+            if (!file.name.endsWith('.csv')) {
+                showToast('Please upload a CSV file');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                if (parseCSV(ev.target.result)) {
+                    document.getElementById('uploadCard').style.display = 'none';
+                    document.getElementById('dashboard').style.display = 'block';
+                    document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
+                    populateFilters();
+                    setupSorting();
+                    renderAll();
+                    showToast('Loaded ' + allData.length + ' assets');
+                } else {
+                    showToast('Invalid CSV format');
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', function() {
+            document.getElementById('regionFilter').value = 'all';
+            document.getElementById('statusFilter').value = 'all';
+            document.getElementById('searchInput').value = '';
+            renderAll();
+        });
+
+        document.getElementById('searchInput').addEventListener('input', renderAll);
+        document.getElementById('regionFilter').addEventListener('change', renderAll);
+        document.getElementById('statusFilter').addEventListener('change', renderAll);
+
+        document.getElementById('screenshotBtn').addEventListener('click', takeScreenshot);
+        document.getElementById('reportBtn').addEventListener('click', downloadReport);
+
+        console.log('Fleet Intelligence Dashboard loaded');
     });
 
-    document.getElementById('resetBtn').addEventListener('click', () => {
-        document.getElementById('regionFilter').value = 'all';
-        document.getElementById('statusFilter').value = 'all';
-        document.getElementById('searchInput').value = '';
-        renderAll();
-    });
-
-    document.getElementById('searchInput').addEventListener('input', renderAll);
-    document.getElementById('regionFilter').addEventListener('change', renderAll);
-    document.getElementById('statusFilter').addEventListener('change', renderAll);
-    document.getElementById('downloadPdfBtn').addEventListener('click', downloadReport);
-
-    // Load Leaflet
-    const script = document.createElement('script');
-    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    document.head.appendChild(script);
-
-    console.log('Fleet Intelligence Dashboard loaded');
 </script>
 
 </body>
