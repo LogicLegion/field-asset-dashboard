@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request
+from flask import Flask
+import os
 
 app = Flask(__name__)
 
@@ -16,21 +17,14 @@ HTML_TEMPLATE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Inter', sans-serif;
             background: #f4f6fc;
             padding: 20px 16px;
             color: #1a2b4c;
         }
-        .container {
-            max-width: 1440px;
-            margin: 0 auto;
-        }
+        .container { max-width: 1440px; margin: 0 auto; }
         .hero-header {
             background: linear-gradient(135deg, #0b1e3a 0%, #1f3a60 100%);
             border-radius: 36px;
@@ -42,10 +36,7 @@ HTML_TEMPLATE = """
             align-items: center;
             justify-content: space-between;
         }
-        .hero-left h1 {
-            font-size: 2rem;
-            font-weight: 800;
-        }
+        .hero-left h1 { font-size: 2rem; font-weight: 800; }
         .hero-btn {
             background: rgba(255,255,255,0.12);
             border: 1px solid rgba(255,255,255,0.25);
@@ -66,6 +57,7 @@ HTML_TEMPLATE = """
             border-radius: 2rem;
             padding: 2rem 2.5rem;
             text-align: center;
+            box-shadow: 0 20px 35px -10px rgba(0,0,0,0.08);
         }
         .upload-button {
             background: #eef2ff;
@@ -74,10 +66,13 @@ HTML_TEMPLATE = """
             padding: 2rem;
             cursor: pointer;
             display: inline-block;
+            transition: 0.2s;
         }
-        #dashboard {
-            display: none;
+        .upload-button:hover {
+            background: #e0e7ff;
+            border-color: #4a5b6e;
         }
+        #dashboard { display: none; }
         .kpi-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -91,19 +86,14 @@ HTML_TEMPLATE = """
             border: 1px solid #eef2f8;
             text-align: center;
         }
-        .kpi-value {
-            font-size: 28px;
-            font-weight: 800;
-            color: #1e293b;
-        }
-        .kpi-loss {
-            color: #dc2626;
-        }
+        .kpi-value { font-size: 28px; font-weight: 800; color: #1e293b; }
+        .kpi-loss { color: #dc2626; }
         .filters {
             display: flex;
             flex-wrap: wrap;
             gap: 16px;
             margin-bottom: 28px;
+            align-items: flex-end;
         }
         .filter-group {
             display: flex;
@@ -156,16 +146,9 @@ HTML_TEMPLATE = """
             position: sticky;
             top: 0;
         }
-        td {
-            padding: 10px 8px;
-            border-bottom: 1px solid #f1f5f9;
-        }
-        .critical-row {
-            background-color: #fee2e2;
-        }
-        .warning-row {
-            background-color: #fef3c7;
-        }
+        td { padding: 10px 8px; border-bottom: 1px solid #f1f5f9; }
+        .critical-row { background-color: #fee2e2; }
+        .warning-row { background-color: #fef3c7; }
         .map-container {
             background: white;
             border-radius: 24px;
@@ -173,10 +156,7 @@ HTML_TEMPLATE = """
             margin-bottom: 28px;
             border: 1px solid #eef2f8;
         }
-        #map {
-            height: 400px;
-            border-radius: 16px;
-        }
+        #map { height: 400px; border-radius: 16px; }
         .toast {
             position: fixed;
             bottom: 24px;
@@ -208,9 +188,8 @@ HTML_TEMPLATE = """
             text-align: center;
         }
         @media (max-width: 768px) {
-            .kpi-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+            .hero-header { flex-direction: column; text-align: center; }
         }
     </style>
 </head>
@@ -236,6 +215,7 @@ HTML_TEMPLATE = """
         <div class="upload-button" id="uploadBtn">
             📁<br><strong>Choose File</strong><br><small>or drag & drop</small>
         </div>
+        <div id="fileStatus" style="margin-top:12px; color:#64748b;"></div>
     </div>
 
     <div id="dashboard">
@@ -271,8 +251,6 @@ HTML_TEMPLATE = """
 
 <div id="toast" class="toast"></div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <script>
     let allData = [];
     let currentSort = { column: 'loss', direction: 'desc' };
@@ -301,10 +279,8 @@ HTML_TEMPLATE = """
 
     function getRegion(r) { return r.Province || r.State || 'Unknown'; }
 
-    function getStoreId(r) { return (r.Store || '').replace(/[^a-zA-Z0-9]/g, '_'); }
-
     function parseCSV(text) {
-        const lines = text.split(/\r?\n/);
+        const lines = text.split(/\\r?\\n/);
         if (lines.length < 2) return false;
         let headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
         let data = [];
@@ -424,23 +400,37 @@ HTML_TEMPLATE = """
         }).catch(() => showToast('Failed'));
     }
 
-    document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('csvFile').click());
-    document.getElementById('csvFile').addEventListener('change', e => {
-        if (!e.target.files || !e.target.files[0]) return;
-        const file = e.target.files[0];
-        if (!file.name.endsWith('.csv')) return showToast('Please upload a CSV file');
-        const reader = new FileReader();
-        reader.onload = ev => {
-            if (parseCSV(ev.target.result)) {
-                document.getElementById('uploadCard').style.display = 'none';
-                document.getElementById('dashboard').style.display = 'block';
-                document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
-                populateFilters();
-                renderAll();
-                showToast('Loaded ' + allData.length + ' assets');
-            } else showToast('Invalid CSV');
-        };
-        reader.readAsText(file, 'UTF-8');
+    // ===== FILE UPLOAD FIX =====
+    document.getElementById('uploadBtn').addEventListener('click', function() {
+        document.getElementById('csvFile').click();
+    });
+
+    document.getElementById('csvFile').addEventListener('change', function(e) {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            document.getElementById('fileStatus').textContent = 'Loading: ' + file.name;
+            if (!file.name.endsWith('.csv')) {
+                showToast('Please upload a CSV file');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+                if (parseCSV(ev.target.result)) {
+                    document.getElementById('uploadCard').style.display = 'none';
+                    document.getElementById('dashboard').style.display = 'block';
+                    document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
+                    populateFilters();
+                    renderAll();
+                    showToast('Loaded ' + allData.length + ' assets');
+                } else {
+                    showToast('Invalid CSV format');
+                }
+            };
+            reader.onerror = function() {
+                showToast('Error reading file');
+            };
+            reader.readAsText(file);
+        }
     });
 
     document.getElementById('resetBtn').addEventListener('click', () => {
@@ -453,21 +443,15 @@ HTML_TEMPLATE = """
     document.getElementById('searchInput').addEventListener('input', renderAll);
     document.getElementById('regionFilter').addEventListener('change', renderAll);
     document.getElementById('riskFilter').addEventListener('change', renderAll);
-
-    // Load Leaflet
-    const script = document.createElement('script');
-    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    document.head.appendChild(script);
 </script>
+
 </body>
 </html>
 """
 
-
 @app.route('/')
 def home():
     return HTML_TEMPLATE
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
