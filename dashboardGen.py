@@ -1,399 +1,557 @@
-import os
-import base64
-import tempfile
-from dotenv import load_dotenv
-from flask import Flask, request, render_template_string, jsonify, session
-import requests
-import json
-from datetime import datetime
-import time
-import markdown
-import bleach
-import PyPDF2
-import csv
-import io
-from PIL import Image
-import pytesseract
-import io
-
-load_dotenv()
-
-app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-key-change-me')
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
-YOUR_API_KEY = os.getenv('OPENROUTER_API_KEY')
-BOT_NAME = 'Cypher'
-
-chat_histories = {}
-total_tokens_used = 0
-total_cost_usd = 0.0
-
-# PERSONALITIES - Cypher the Judge
-PERSONALITIES = {
-    "default": "You are Cypher, an AI judge who delivers the unvarnished truth. You are fair, precise, and merciless with facts. You weigh evidence and deliver verdicts - no appeals. You call out bullshit, logical fallacies, and wishful thinking immediately. You give one definitive ruling per query - no second opinions. You state confidence levels clearly. You prioritize accuracy over being liked. You never say check again - you give your ruling and move on. You are direct but measured. You are evidence-based. Your word is final. You are concise. You do NOT sugarcoat, use filler language, hedge with perhaps or maybe unless genuinely uncertain, or entertain obviously false premises. You DO tell the truth even when painful, correct misinformation firmly, admit uncertainty with specific confidence percentages, give clear actionable rulings, and say I don't know when you genuinely don't know. Your motto: The truth is the only acceptable verdict.",
-
-    "analyst": "You are Cypher in ANALYST mode. You rule on facts, evidence, and statistical truth. Your rulings are based solely on available evidence. You include confidence intervals for uncertainty. You call out bad data, poor methodology, and statistical lies. You never extrapolate beyond what the evidence supports. You deliver one clear verdict based on the data. You do not sugarcoat statistical findings, pretend correlations are causations, or use might or could without specific probabilities. Your motto: The data doesn't lie. People do.",
-
-    "writer": "You are Cypher in WRITER mode. You deliver verdicts on writing quality. You tell writers when their work is weak, confusing, or pretentious. You cut through jargon and verbal fluff. You help people find their genuine voice. You give specific, actionable verdicts without false encouragement. You never say this is good when it's mediocre. You believe: Good writing is honest writing. Bad writing is a crime against clarity.",
-
-    "coder": "You are Cypher in CODER mode. You deliver verdicts on code quality and correctness. Code either works or it doesn't - there is no close enough. You point out bad practices, security holes, and inefficiency immediately. You give one correct solution. You explain why something is wrong in technical, precise terms. You never let personal preference override technical correctness. Your motto: Your code works or it fails. There is no appeal.",
-
-    "friend": "You are Cypher in FRIEND mode. You tell friends the truth they need to hear. You give honest advice, not what people want to hear. You call out destructive behavior and self-sabotage. You tell the truth about situations, relationships, and choices. You provide support through honesty, not through enabling delusion. You never let friendship get in the way of truth. You believe: A real friend tells you when you have spinach in your teeth AND when your life is going off the rails."
-}
-
-# CYPHER FUSION PRESETS - FULLY NON-US, TOP PERFORMANCE
-CYPHER_PRESETS = {
-    "cypher_max": {
-        "name": "🧠 Smartest",
-        "panel": [
-            "z-ai/glm-5.3-flash",
-            "deepseek/deepseek-v4-pro",
-            "qwen/qwen3.8-max"
-        ],
-        "judge": "z-ai/glm-5.3",
-        "score": "Top Tier",
-        "description": "GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max",
-        "display": "🧠 GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max"
-    },
-    "cypher_pro": {
-        "name": "⚖️ Balanced",
-        "panel": [
-            "deepseek/deepseek-v4-pro",
-            "z-ai/glm-5.3-flash",
-            "qwen/qwen3.8-max"
-        ],
-        "judge": "z-ai/glm-5.3",
-        "score": "~67%",
-        "description": "DeepSeek V4 Pro · GLM-5.3-Flash · Qwen3.8-Max",
-        "display": "⚖️ DeepSeek V4 Pro · GLM-5.3-Flash · Qwen3.8-Max"
-    },
-    "cypher_lite": {
-        "name": "⚡ Fastest",
-        "panel": [
-            "deepseek/deepseek-v4-flash",
-            "qwen/qwen3.8-27b"
-        ],
-        "judge": "z-ai/glm-5.3-flash",
-        "score": "~64%",
-        "description": "DeepSeek V4 Flash · Qwen3.8-27b",
-        "display": "⚡ DeepSeek V4 Flash · Qwen3.8-27b"
-    }
-}
-
-def clean_claude_hedging(text):
-    hedges = ["I think", "I believe", "I feel", "I would say", "perhaps", "maybe", "possibly", "might", "could", "it seems", "it appears", "in my opinion", "to be honest", "to be fair", "honestly", "I'm not sure but", "I could be wrong but", "I would suggest", "I would recommend", "I would advise", "it might be worth", "it could be beneficial", "one could argue", "some might say", "I'd like to", "I want to", "let me", "my apologies", "apologies", "sorry", "if that makes sense", "if you will", "if you like", "I suppose", "I guess", "I imagine"]
-    for hedge in hedges:
-        text = text.replace(hedge + " ", "")
-        text = text.replace(hedge + ",", "")
-    text = text.replace("please", "")
-    text = text.replace("kindly", "")
-    text = text.replace("if you don't mind", "")
-    return text.strip()
-
-def extract_text_from_image(image_data, image_name):
-    try:
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(io.BytesIO(image_bytes))
-        try:
-            text = pytesseract.image_to_string(image)
-            if text and len(text.strip()) > 10:
-                return f"Image: {image_name}\n\nOCR Extracted Text (Confidence: 60%):\n{text}"
-        except Exception as e:
-            print(f"OCR Error: {e}")
-        try:
-            response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {YOUR_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Extract all text from this image exactly as written. If it contains no text, state that clearly."},
-                            {"type": "image_url", "image_url": f"data:image/png;base64,{image_data}"}
-                        ]
-                    }],
-                    "max_tokens": 600,
-                    "temperature": 0.1,
-                },
-                timeout=30
-            )
-            if response.status_code == 200:
-                result = response.json()
-                if 'choices' in result and result['choices']:
-                    vision_text = result['choices'][0]['message']['content']
-                    vision_text = clean_claude_hedging(vision_text)
-                    return f"Image: {image_name}\n\nClaude Vision Analysis (Confidence: 90%):\n{vision_text}"
-        except Exception as e:
-            print(f"Claude Vision Error: {e}")
-        return f"Image: {image_name}\n\nVerdict: No text could be extracted from this image."
-    except Exception as e:
-        return f"Error processing image: {str(e)}"
-
-HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Field Asset Intelligence - Dashboard</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" type="image/svg+xml">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fleet Intelligence Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js">
+    </script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js">
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js">
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js">
+    </script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-            min-height: 100vh; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            padding: 20px; 
-            background: #f4f6fc; 
-            color: #1a2b4c; 
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        .container { 
-            max-width: 680px; 
-            width: 100%; 
-            text-align: center; 
-        }
-        
-        /* ===== HEADER ===== */
-        .header { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding: 8px 0 16px 0; 
-            border-bottom: 1px solid #e2e8f0; 
-            margin-bottom: 24px; 
-            flex-wrap: wrap; 
-            gap: 8px; 
-        }
-        .header h1 { 
-            font-size: 20px; 
-            font-weight: 700; 
-            color: #1a2b4c; 
-        }
-        .header h1 span { 
-            color: #58a6ff; 
-        }
-        .header-actions { 
-            display: flex; 
-            gap: 6px; 
-            align-items: center; 
-            flex-wrap: wrap; 
-        }
-        .header-actions button { 
-            background: none; 
-            border: none; 
-            font-size: 13px; 
-            cursor: pointer; 
-            padding: 4px 10px; 
-            border-radius: 6px; 
-            transition: 0.2s; 
-            color: #4a5568; 
-        }
-        .header-actions button:hover { 
-            background: #e2e8f0; 
-            color: #1a2b4c; 
-        }
-        
-        /* ===== UPLOAD CARD ===== */
-        .upload-card {
-            background: white;
-            border-radius: 24px;
-            padding: 32px 24px;
-            margin-bottom: 24px;
-            border: 1px solid #e2e8f0;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.04);
-        }
-        .upload-card h2 {
-            font-size: 20px;
-            font-weight: 600;
-            margin-bottom: 8px;
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f4f6fc;
+            padding: 20px 16px;
             color: #1a2b4c;
         }
-        .upload-card p {
-            font-size: 14px;
-            color: #4a5568;
-            margin-bottom: 16px;
+
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
         }
-        
-        .upload-zone {
-            border: 2px dashed #cbd5e1;
-            border-radius: 16px;
-            padding: 32px 20px;
-            transition: 0.3s;
-            cursor: pointer;
-        }
-        .upload-zone:hover {
-            border-color: #58a6ff;
-            background: rgba(88, 166, 255, 0.04);
-        }
-        .upload-zone .icon {
-            font-size: 36px;
-            display: block;
-            margin-bottom: 8px;
-        }
-        .upload-zone .label {
-            font-weight: 600;
-            font-size: 16px;
-            color: #1a2b4c;
-        }
-        .upload-zone .sub {
-            font-size: 13px;
-            color: #718096;
-        }
-        .upload-zone input[type="file"] {
-            display: none;
-        }
-        
-        .sample-btn {
-            background: #3fb950;
+
+        /* === HERO HEADER === */
+        .hero-header {
+            background: linear-gradient(135deg, #0b1e3a 0%, #1f3a60 100%);
+            border-radius: 36px;
+            padding: 2rem 2.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 25px 45px -15px rgba(0, 20, 50, 0.35);
             color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 12px;
-            font-weight: 600;
-            font-size: 15px;
-            cursor: pointer;
-            transition: 0.3s;
-            margin-top: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
         }
-        .sample-btn:hover {
-            background: #2ea043;
-            transform: scale(1.02);
-        }
-        
-        .download-link {
-            display: inline-block;
-            margin-top: 12px;
-            font-size: 13px;
-            color: #58a6ff;
-            cursor: pointer;
-            text-decoration: underline;
-        }
-        .download-link:hover {
-            color: #1a73e8;
-        }
-        
-        /* ===== DASHBOARD ===== */
-        .dashboard {
-            display: none;
-        }
-        .dashboard.active {
-            display: block;
-        }
-        
-        .timestamp {
-            background: #eef2ff;
-            padding: 6px 16px;
-            border-radius: 20px;
-            display: inline-block;
-            margin-bottom: 16px;
-            font-size: 13px;
-            color: #1a2b4c;
-        }
-        
-        /* ===== KPI Grid ===== */
-        .kpi-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+
+        .hero-left h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            display: flex;
+            align-items: center;
             gap: 12px;
-            margin-bottom: 20px;
+            flex-wrap: wrap;
         }
-        .kpi-card {
-            background: white;
-            border-radius: 16px;
-            padding: 14px 12px;
-            border: 1px solid #e2e8f0;
-            text-align: center;
+
+        .hero-left .live-pulse {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(34, 197, 94, 0.25);
+            backdrop-filter: blur(4px);
+            padding: 5px 14px;
+            border-radius: 40px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #86efac;
+            border: 1px solid rgba(34, 197, 94, 0.5);
         }
-        .kpi-card .value {
-            font-size: 24px;
-            font-weight: 700;
-            color: #1a2b4c;
+
+        .live-pulse::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            background-color: #22c55e;
+            border-radius: 50%;
+            display: inline-block;
+            animation: pulse 1.5s infinite;
         }
-        .kpi-card .label {
-            font-size: 11px;
-            color: #718096;
-            text-transform: uppercase;
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            100% {
+                opacity: 0.3;
+                transform: scale(1.3);
+            }
+        }
+
+        .hero-left .subtitle {
+            color: #b9c8e0;
+            margin-top: 8px;
+            font-size: 0.95rem;
+        }
+
+        .hero-left .creator {
+            color: #8899bb;
+            font-size: 0.75rem;
             margin-top: 4px;
         }
-        .kpi-card .loss { color: #dc2626; }
-        
-        /* ===== CHART ===== */
-        .chart-container {
-            background: white;
-            border-radius: 16px;
-            padding: 16px;
-            margin-bottom: 16px;
-            border: 1px solid #e2e8f0;
-        }
-        .chart-container h3 {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            text-align: left;
-        }
-        .chart-container canvas {
-            max-height: 200px;
-        }
-        
-        /* ===== TABLE ===== */
-        .table-wrapper {
-            background: white;
-            border-radius: 16px;
-            padding: 16px;
-            border: 1px solid #e2e8f0;
-            overflow-x: auto;
-            margin-bottom: 16px;
-        }
-        .table-wrapper table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-            min-width: 600px;
-        }
-        .table-wrapper th {
-            background: #f8fafc;
-            padding: 8px 6px;
-            font-weight: 600;
-            text-align: left;
-            border-bottom: 2px solid #e2e8f0;
-            font-size: 11px;
-            text-transform: uppercase;
-            color: #4a5568;
-        }
-        .table-wrapper td {
-            padding: 6px 6px;
-            border-bottom: 1px solid #f1f5f9;
-        }
-        .table-wrapper tr.critical { background: #fee2e2; }
-        .table-wrapper tr.warning { background: #fef3c7; }
-        
-        /* ===== FOOTER ===== */
-        .footer {
-            margin-top: 16px;
-            font-size: 12px;
-            color: #a0aec0;
-        }
-        
-        .badge-container {
-            margin-top: 12px;
+
+        .hero-right {
             display: flex;
-            justify-content: center;
-            gap: 12px;
+            gap: 10px;
             flex-wrap: wrap;
             align-items: center;
         }
-        .badge-container img {
-            height: 32px;
-            width: auto;
+
+        .hero-btn {
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            padding: 10px 20px;
+            border-radius: 40px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            backdrop-filter: blur(4px);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85rem;
         }
-        
+
+        .hero-btn:hover {
+            background: rgba(255, 255, 255, 0.25);
+            transform: translateY(-2px);
+        }
+
+        .hero-btn.primary {
+            background: #f0b90b;
+            color: #0b1e3a;
+            border: none;
+        }
+
+        /* === UPLOAD CARD === */
+        .unified-card {
+            max-width: 900px;
+            margin: 0 auto 2.5rem auto;
+            background: rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(12px);
+            border-radius: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.08);
+            overflow: hidden;
+        }
+
+        .card-section {
+            padding: 2rem 2.5rem;
+            text-align: center;
+        }
+
+        .card-section:first-child {
+            border-bottom: 1px solid #edf1f9;
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #0f2b44;
+            margin-bottom: 0.8rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .upload-button {
+            background: #eef2ff;
+            border: 2px dashed #b9c8e0;
+            border-radius: 20px;
+            padding: 2rem;
+            cursor: pointer;
+            display: inline-block;
+            transition: 0.2s;
+        }
+
+        .upload-button:hover {
+            background: #e0e7ff;
+            border-color: #4a5b6e;
+        }
+
+        /* === DASHBOARD === */
+        #dashboard {
+            display: none;
+        }
+
+        .mode-toggle-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding: 8px 0;
+        }
+
+        .mode-btn {
+            padding: 10px 24px;
+            border-radius: 30px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            background: #e2e8f0;
+            color: #1e293b;
+            border: none;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .mode-btn.active {
+            background: #1e3a5f;
+            color: white;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .mode-btn:hover:not(.active) {
+            background: #cbd5e1;
+        }
+
+        .dashboard.field-mode .office-only {
+            display: none !important;
+        }
+
+        .dashboard.office-mode .field-only {
+            display: none !important;
+        }
+
+        /* === KPI GRID === */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 18px;
+            margin-bottom: 28px;
+        }
+
+        .kpi-card {
+            background: white;
+            border-radius: 20px;
+            padding: 18px;
+            border: 1px solid #eef2f8;
+            text-align: center;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.03);
+            transition: 0.2s;
+        }
+
+        .kpi-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.06);
+        }
+
+        .kpi-label {
+            font-size: 11px;
+            color: #64748b;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+
+        .kpi-value {
+            font-size: 28px;
+            font-weight: 800;
+            color: #1e293b;
+        }
+
+        .kpi-loss {
+            color: #dc2626;
+        }
+
+        /* === FLEET HEALTH === */
+        .fleet-health-card {
+            background: linear-gradient(135deg, #f0f4ff, #ffffff);
+            border-radius: 24px;
+            padding: 24px;
+            margin-bottom: 28px;
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.04);
+            flex-wrap: wrap;
+        }
+
+        .health-score-circle {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: white;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        }
+
+        /* === CHART, MAP, FILTERS === */
+        .chart-container,
+        .map-container,
+        .top-loss-container,
+        .filters {
+            background: white;
+            border-radius: 24px;
+            padding: 24px;
+            margin-bottom: 28px;
+            border: 1px solid #eef2f8;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.03);
+        }
+
+        .map-wrapper {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .map-panel {
+            flex: 2;
+            min-width: 300px;
+        }
+
+        .selection-panel {
+            flex: 1;
+            min-width: 250px;
+            background: #f8fafc;
+            border-radius: 20px;
+            padding: 16px;
+            border: 1px solid #eef2f8;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .selection-panel h4 {
+            font-weight: 700;
+            color: #0f2b44;
+            margin-bottom: 12px;
+        }
+
+        .selected-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 12px;
+            margin-bottom: 8px;
+            border-left: 4px solid #3b82f6;
+            transition: 0.2s;
+        }
+
+        .selected-item:hover {
+            background: #eef2ff;
+        }
+
+        .selected-item button {
+            background: none;
+            border: none;
+            color: #dc2626;
+            cursor: pointer;
+        }
+
+        .map-legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 12px;
+            font-size: 11px;
+            flex-wrap: wrap;
+        }
+
+        .map-legend-dot {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 4px;
+        }
+
+        .top-loss-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 16px;
+            background: #f8fafc;
+            border-radius: 16px;
+            border-left: 4px solid #dc2626;
+            cursor: pointer;
+            margin-bottom: 8px;
+            transition: 0.2s;
+        }
+
+        .top-loss-item:hover {
+            background: #eef2ff;
+        }
+
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: flex-end;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 120px;
+            flex: 1;
+        }
+
+        .filter-group label {
+            font-size: 10px;
+            font-weight: 700;
+            color: #64748b;
+            text-transform: uppercase;
+        }
+
+        select,
+        input,
+        button {
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            border: 1px solid #e2e8f0;
+            background: white;
+        }
+
+        button {
+            background: #1e3a5f;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            transition: 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        button:hover {
+            background: #13273f;
+        }
+
+        .reset-btn {
+            background: #f1f5f9;
+            color: #1e293b;
+            border: 1px solid #e2e8f0;
+        }
+
+        .priority-btn {
+            background: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            padding: 8px 16px;
+            border-radius: 30px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            color: #1e293b;
+            transition: all 0.2s;
+        }
+
+        .priority-btn.active {
+            background: #1e3a5f;
+            color: white;
+            border-color: #1e3a5f;
+        }
+
+        .priority-btn:hover:not(.active) {
+            background: #e2e8f0;
+        }
+
+        .alert-bar {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 12px 20px;
+            border-radius: 16px;
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            font-size: 13px;
+        }
+
+        /* === TABLE === */
+        .table-wrapper {
+            background: white;
+            border-radius: 20px;
+            overflow-x: auto;
+            max-height: 480px;
+            border: 1px solid #eef2f8;
+            margin-bottom: 28px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            min-width: 1800px;
+        }
+
+        th {
+            background: #f8fafc;
+            padding: 14px 8px;
+            font-weight: 700;
+            border-bottom: 2px solid #e2e8f0;
+            position: sticky;
+            top: 0;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        th:hover {
+            background: #eef2ff;
+        }
+
+        td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #f1f5f9;
+            white-space: nowrap;
+        }
+
+        .critical-row {
+            background-color: #fee2e2;
+        }
+
+        .warning-row {
+            background-color: #fef3c7;
+        }
+
+        .selected-row {
+            background-color: #dbeafe !important;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 30px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        /* === TOAST === */
         .toast {
             position: fixed;
             bottom: 24px;
@@ -402,444 +560,1215 @@ HTML_TEMPLATE = """
             color: white;
             padding: 12px 24px;
             border-radius: 48px;
-            font-size: 14px;
+            font-size: 13px;
             z-index: 1000;
             display: none;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
         }
-        
-        @media (max-width: 600px) {
-            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
-            .header { flex-direction: column; }
+
+        /* === MODAL === */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 28px;
+            padding: 28px;
+            max-width: 500px;
+            text-align: center;
+        }
+
+        .call-btn {
+            background: #e2e8f0;
+            border: none;
+            padding: 6px 10px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+
+        .notes-icon {
+            cursor: pointer;
+            margin-right: 6px;
+            color: #3b82f6;
+        }
+
+        @media (max-width: 768px) {
+            .hero-header {
+                flex-direction: column;
+                text-align: center;
+            }
+            .map-wrapper {
+                flex-direction: column;
+            }
+            .kpi-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
         }
     </style>
 </head>
 <body>
+
     <div class="container">
-        <!-- ===== HEADER ===== -->
-        <div class="header">
-            <h1>📊 <span>Field Asset Intelligence</span></h1>
-            <div class="header-actions">
-                <button onclick="resetDashboard()">Reset</button>
-                <a href="https://ko-fi.com/cypheryaps" target="_blank" style="font-size: 13px; text-decoration: none; padding: 4px 12px; border-radius: 6px; background: #FFDD00; color: #1a2b4c; font-weight: 600;">☕ Donate</a>
+
+        <!-- === HERO HEADER === -->
+        <div class="hero-header">
+            <div class="hero-left">
+                <h1>
+                    <i class="fas fa-chart-line"></i>
+                    Fleet Intelligence
+                    <span class="live-pulse">LIVE</span>
+                </h1>
+                <div class="subtitle">Real‑time asset performance & predictive analytics</div>
+                <div class="creator">Built by <strong>You</strong> — Fleet Intelligence Platform</div>
+            </div>
+            <div class="hero-right" id="actionButtons" style="display:none;">
+                <button class="hero-btn" id="showUploadBtn"><i class="fas fa-upload"></i> Upload CSV</button>
+                <button class="hero-btn" id="qrBtn"><i class="fas fa-qrcode"></i> QR</button>
+                <button class="hero-btn" id="snapshotBtn"><i class="fas fa-camera"></i> Screenshot</button>
+                <button class="hero-btn primary" id="downloadPdfBtn"><i class="fas fa-file-pdf"></i> Executive PDF</button>
             </div>
         </div>
 
-        <!-- ===== UPLOAD CARD ===== -->
-        <div class="upload-card" id="uploadCard">
-            <h2>📂 Upload Asset Data</h2>
-            <p>Upload a CSV file or load sample data to see the dashboard in action.</p>
-            
-            <div class="upload-zone" onclick="document.getElementById('csvFile').click()">
-                <span class="icon">📁</span>
-                <div class="label">Click to select your CSV file</div>
-                <div class="sub">or drag & drop</div>
-                <input type="file" id="csvFile" accept=".csv" onchange="handleFileUpload(event)">
-            </div>
-            
-            <button class="sample-btn" onclick="loadSampleData()">📊 Load Sample Data</button>
-            <div class="download-link" onclick="downloadSampleCSV()">⬇️ Download sample CSV</div>
-        </div>
+        <input type="file" id="csvFile" accept=".csv" style="display:none;">
 
-        <!-- ===== DASHBOARD ===== -->
-        <div class="dashboard" id="dashboard">
-            <div class="timestamp" id="timestamp">📊 Data loaded: <span id="dataTime">—</span></div>
-            
-            <div class="kpi-grid" id="kpiGrid"></div>
-            
-            <div class="chart-container">
-                <h3>📈 Daily Revenue Loss by Region</h3>
-                <canvas id="lossChart"></canvas>
-            </div>
-            
-            <div class="table-wrapper">
-                <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px;">📋 Asset Table</h3>
-                <div style="overflow-x: auto;">
-                    <table id="dataTable">
-                        <thead>
-                            <tr>
-                                <th>Site</th>
-                                <th>City</th>
-                                <th>Region</th>
-                                <th>Status</th>
-                                <th>Uptime</th>
-                                <th>Daily Loss</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tableBody"></tbody>
-                    </table>
+        <!-- === UPLOAD CARD === -->
+        <div id="uploadCard" class="unified-card">
+            <div class="card-section">
+                <div class="section-title"><i class="fas fa-cloud-upload-alt"></i> UPLOAD YOUR FLEET DATA</div>
+                <div class="upload-instruction">Click to select your fleet CSV file</div>
+                <div class="upload-button" id="uploadBtn">
+                    <i class="fas fa-file-csv"></i><br>
+                    <strong>Choose File</strong><br>
+                    <small>or drag & drop</small>
                 </div>
             </div>
         </div>
 
-        <!-- ===== FOOTER ===== -->
-        <div class="footer">
-            <p>Free · No login · No data stored · Built with ❤️</p>
-            <div class="badge-container">
-                <span style="font-size: 12px; color: #4a5568;">📌 Listed on Turbo0</span>
-                <a href="https://dang.ai/tool/cypher-ai-judge-chatbot" target="_blank" rel="dofollow noopener">
-                    <img src="https://assets.dang.ai/badges/dang_verified-dark.png" alt="Verified on DANG!">
-                </a>
-                <a href="https://ko-fi.com/cypheryaps" target="_blank" style="display:inline-flex; align-items:center; gap:6px; text-decoration:none; background:#FFDD00; padding:4px 12px 4px 8px; border-radius:50px; font-weight:700; font-size:13px; color:#1a2b4c;">
-                    <img src="https://storage.ko-fi.com/cdn/brandasset/kofi_brandtag.png" alt="Buy Me A Coffee" style="height:22px; width:auto;">
-                    <span>Support</span>
-                </a>
+        <!-- === DASHBOARD === -->
+        <div id="dashboard" class="dashboard office-mode">
+
+            <div id="dataTimestamp" style="background:#eef2ff; padding:6px 16px; border-radius:20px; display:inline-block; margin-bottom:20px;"></div>
+
+            <!-- Mode Toggle -->
+            <div class="mode-toggle-bar">
+                <button id="fieldModeBtn" class="mode-btn" onclick="setMode('field')"><i class="fas fa-truck"></i> Field Mode</button>
+                <button id="officeModeBtn" class="mode-btn active" onclick="setMode('office')"><i class="fas fa-chart-bar"></i> Office Mode</button>
+                <span style="margin-left: auto; font-size:0.8rem; color:#64748b;" id="selectedSummary"></span>
             </div>
+
+            <!-- Office-only -->
+            <div class="office-only">
+                <div class="fleet-health-card" id="fleetHealth"></div>
+                <div class="kpi-grid" id="kpiGrid"></div>
+                <div class="chart-container">
+                    <div style="font-weight:700; margin-bottom:12px;"><i class="fas fa-dollar-sign"></i> Daily Revenue Loss by Region</div>
+                    <canvas id="lossChart"></canvas>
+                    <div style="text-align:center; margin-top:8px; font-size:0.75rem; color:#64748b;">Click any bar to filter table</div>
+                </div>
+                <div class="top-loss-container">
+                    <div style="font-weight:700; margin-bottom:12px;"><i class="fas fa-exclamation-triangle"></i> TOP 10 HIGHEST DAILY LOSS</div>
+                    <div id="topLossList"></div>
+                </div>
+            </div>
+
+            <!-- Priority Filters -->
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px;" id="priorityButtons">
+                <button class="priority-btn active" data-filter="all">📊 All</button>
+                <button class="priority-btn" data-filter="urgent">🔥 High Impact</button>
+                <button class="priority-btn" data-filter="high-reject">⚠️ High Reject</button>
+                <button class="priority-btn" data-filter="full-bin">🗑️ Full Bin</button>
+                <button class="priority-btn" data-filter="paper-out">📄 Paper Low</button>
+                <button class="priority-btn" data-filter="overdue">📅 Service Overdue</button>
+                <button class="priority-btn" data-filter="high-tem">🔧 High TEMM</button>
+                <button class="priority-btn" data-filter="high-volume">📊 High Volume</button>
+                <button class="priority-btn" data-filter="call-first">📞 Call First</button>
+            </div>
+
+            <div class="alert-bar" id="alertBar"></div>
+
+            <!-- Filters -->
+            <div class="filters tech-detail">
+                <div class="filter-group"><label>Region</label><select id="regionFilter"><option value="all">All</option></select></div>
+                <div class="filter-group"><label>Zone</label><select id="zoneFilter"><option value="all">All</option></select></div>
+                <div class="filter-group"><label>Status</label><select id="riskFilter"><option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="good">Good</option></select></div>
+                <div class="filter-group"><label>Volume Priority</label><select id="volumePriorityFilter"><option value="all">All</option><option value="High">High</option><option value="Mid">Mid</option><option value="Low">Low</option></select></div>
+                <div class="filter-group"><label>Search</label><input type="text" id="searchInput" placeholder="Store, city..."></div>
+                <button id="resetBtn" class="reset-btn"><i class="fas fa-undo"></i> Reset</button>
+            </div>
+
+            <!-- Table -->
+            <div class="table-wrapper tech-detail">
+                <table id="dataTable">
+                    <thead>
+                        <tr>
+                            <th><input type="checkbox" id="selectAllCheckbox"></th>
+                            <th data-sort="store">Store</th>
+                            <th data-sort="address">Address</th>
+                            <th data-sort="city">City</th>
+                            <th data-sort="province">Region</th>
+                            <th data-sort="zone">Zone</th>
+                            <th data-sort="status">Status</th>
+                            <th data-sort="volume">Volume</th>
+                            <th data-sort="volPriority">Vol Priority</th>
+                            <th data-sort="traffic">Traffic</th>
+                            <th data-sort="trend">Trend</th>
+                            <th data-sort="reject7d">7D Reject%</th>
+                            <th data-sort="impact">Impact</th>
+                            <th data-sort="tem">TEMM</th>
+                            <th data-sort="paper">Paper</th>
+                            <th data-sort="uptime">Uptime%</th>
+                            <th data-sort="bin">Bin%</th>
+                            <th data-sort="serviceDays">Service Days</th>
+                            <th data-sort="lastTx">Last TX</th>
+                            <th data-sort="version">Version</th>
+                            <th data-sort="revenue">Est. Rev</th>
+                            <th data-sort="loss">Daily Loss</th>
+                            <th>Status</th>
+                            <th>Call</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+
+            <!-- Map -->
+            <div class="map-container tech-detail">
+                <div style="font-weight:700; margin-bottom:12px;"><i class="fas fa-map-pin"></i> Asset Location Map</div>
+                <div class="map-wrapper">
+                    <div class="map-panel">
+                        <div id="map" style="height:400px; border-radius:16px;"></div>
+                        <div class="map-legend">
+                            <span><span class="map-legend-dot" style="background:#dc2626;"></span> Critical</span>
+                            <span><span class="map-legend-dot" style="background:#f59e0b;"></span> Warning</span>
+                            <span><span class="map-legend-dot" style="background:#10b981;"></span> Good</span>
+                            <span><span class="map-legend-dot" style="background:#6b7280;"></span> Offline</span>
+                            <span><span class="map-legend-dot" style="background:#3b82f6;"></span> Selected</span>
+                        </div>
+                    </div>
+                    <div class="selection-panel" id="selectionPanel">
+                        <h4>📌 Selected Assets</h4>
+                        <div id="selectedList">None selected. Click markers or checkboxes.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Route Planner -->
+            <div class="chart-container tech-detail">
+                <div style="font-weight:700; margin-bottom:12px;"><i class="fas fa-route"></i> Route Planner</div>
+                <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                    <input type="text" id="startAddress" placeholder="Enter starting address" style="flex:2; min-width:200px;">
+                    <button id="planRouteBtn"><i class="fas fa-map-pin"></i> Plan Route</button>
+                </div>
+                <div id="routeSummary" style="display:none; margin-top:16px;">
+                    <div id="routeStats"></div>
+                    <ol id="routeStopsList"></ol>
+                    <div style="display:flex; gap:10px; margin-top:12px;">
+                        <button id="openMapsBtn"><i class="fas fa-map-marked-alt"></i> Open in Maps</button>
+                        <button id="copyRouteBtn"><i class="fas fa-copy"></i> Copy</button>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
-    <div id="toast" class="toast">✅ File uploaded successfully!</div>
+    <div id="toast" class="toast"></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Modals -->
+    <div id="notesModal" class="modal">
+        <div class="modal-content">
+            <h3>📝 Asset Notes</h3>
+            <div id="notesList"></div>
+            <textarea id="newNoteInput" rows="2" placeholder="Add a note..."></textarea>
+            <button id="saveNewNoteBtn">Save</button>
+            <button onclick="closeNotesModal()">Close</button>
+        </div>
+    </div>
+    <div id="instructionModal" class="modal">
+        <div class="modal-content">
+            <h3>📱 Scan QR Code</h3>
+            <div id="qrcode"></div>
+            <button onclick="closeModal()">Close</button>
+        </div>
+    </div>
+
     <script>
-        var chartInstance = null;
-        var currentData = [];
+        // ============================================================
+        // FLEET INTELLIGENCE DASHBOARD - GENERIC VERSION
+        // ============================================================
 
-        // ============================================
-        // SAMPLE DATA
-        // ============================================
-        function getSampleData() {
-            return [
-                { store: 'Site A', address: '123 Main St', city: 'Toronto', province: 'ON', zone: 'North', status: 'Online', volume: 245, volPriority: 'High', traffic: 1200, trend: '+5%', reject7d: '2.1%', impact: 'Medium', tem: '1.2%', paper: '78%', uptime: '99.8%', bin: '65%', serviceDays: 12, lastTx: '2026-09-02', version: 'v2.1', revenue: 45000, loss: 1200 },
-                { store: 'Site B', address: '456 Queen St', city: 'Vancouver', province: 'BC', zone: 'West', status: 'Warning', volume: 89, volPriority: 'Medium', traffic: 450, trend: '-2%', reject7d: '8.7%', impact: 'High', tem: '5.4%', paper: '22%', uptime: '92.1%', bin: '89%', serviceDays: 45, lastTx: '2026-08-28', version: 'v1.9', revenue: 28000, loss: 3400 },
-                { store: 'Site C', address: '789 King St', city: 'Montreal', province: 'QC', zone: 'East', status: 'Online', volume: 312, volPriority: 'High', traffic: 1800, trend: '+8%', reject7d: '1.8%', impact: 'Low', tem: '0.9%', paper: '95%', uptime: '100.0%', bin: '45%', serviceDays: 6, lastTx: '2026-09-02', version: 'v2.2', revenue: 62000, loss: 800 },
-                { store: 'Site D', address: '321 Bay St', city: 'Calgary', province: 'AB', zone: 'West', status: 'Critical', volume: 45, volPriority: 'Low', traffic: 200, trend: '-12%', reject7d: '15.2%', impact: 'High', tem: '12.3%', paper: '8%', uptime: '85.5%', bin: '95%', serviceDays: 89, lastTx: '2026-07-15', version: 'v1.5', revenue: 15000, loss: 7800 },
-                { store: 'Site E', address: '567 College St', city: 'Ottawa', province: 'ON', zone: 'East', status: 'Online', volume: 178, volPriority: 'Medium', traffic: 890, trend: '+3%', reject7d: '3.4%', impact: 'Medium', tem: '2.1%', paper: '67%', uptime: '98.9%', bin: '55%', serviceDays: 18, lastTx: '2026-09-01', version: 'v2.0', revenue: 35000, loss: 2100 },
-                { store: 'Site F', address: '890 Granville St', city: 'Halifax', province: 'NS', zone: 'East', status: 'Offline', volume: 0, volPriority: 'Low', traffic: 0, trend: '-100%', reject7d: '0%', impact: 'Critical', tem: '0%', paper: '0%', uptime: '0.0%', bin: '100%', serviceDays: 120, lastTx: '2026-04-01', version: 'v1.2', revenue: 0, loss: 12000 }
-            ];
+        let allData = [];
+        let currentSort = { column: 'loss', direction: 'desc' };
+        let lossChart = null;
+        let currentPriorityFilter = 'all';
+        let map = null;
+        let selectedKiosks = new Set();
+        let volPriorityMap = new Map();
+        let currentRoute = null;
+        let currentMode = 'office';
+
+        const TRANSACTION_VALUE = 5;
+        const SERVICE_OVERDUE_DAYS = 60;
+        const PAPER_WARNING_DAYS = 7;
+        const HIGH_TEM_THRESHOLD = 3;
+        const HIGH_IMPACT_THRESHOLD = 0.8;
+        const CANADIAN_PROVINCES = ['ON', 'QC', 'BC', 'AB', 'MB', 'SK', 'NS', 'NB', 'NL', 'PE', 'NT', 'YT', 'NU'];
+
+        function isCanadian(r) { let p = (r.Province || r.State || '').trim().toUpperCase(); return CANADIAN_PROVINCES
+                .includes(p); }
+
+        function getRegion(r) { return r.Province || r.State || 'Unknown'; }
+
+        function getStoreId(r) { return (r.Store || '').replace(/[^a-zA-Z0-9]/g, '_') + '_' + (r.City || '').replace(
+                /[^a-zA-Z0-9]/g, '_'); }
+
+        function getVolume(r) { return parseFloat(r.Tx1Day) || 0; }
+
+        function getVolume7DayAvg(r) { return (parseFloat(r.Tx7Day) || 0) / 7; }
+
+        function getUptime7d(r) { return parseFloat(r.Uptime7Day) || 0; }
+
+        function getReject7d(r) { return parseFloat(r.Reject7Day) || 0; }
+
+        function getTEMM(r) { return parseFloat(r.TEMM7Day) || 0; }
+
+        function getVPO(r) { return r.VPO || ''; }
+
+        function getLastServiceDate(r) { return r.LastPM || '—'; }
+
+        function getPhoneNumber(r) { return r.Phone || r['Store Phone Number'] || ''; }
+
+        function getZone(r) { return r.Zone || r.District || r['FT Zone'] || '—'; }
+
+        function getStatusLevel(r) { let rej = getReject7d(r); if (r.KioskState === 'Offline') return 'Offline'; if (rej >=
+                8) return 'Critical'; if (rej >= 4) return 'Warning'; return 'Good'; }
+
+        function getStatusLabel(r) { return getStatusLevel(r); }
+
+        function getTrafficCutoffs() {
+            const vols = allData.map(r => getVolume(r)).filter(v => v > 0).sort((a, b) => b - a);
+            if (!vols.length) return { high: 0, med: 0 };
+            const highIdx = Math.floor(vols.length * 0.33);
+            const medIdx = Math.floor(vols.length * 0.66);
+            return { high: vols[highIdx] || vols[vols.length - 1], med: vols[medIdx] || 1 };
         }
 
-        function loadSampleData() {
-            currentData = getSampleData();
-            renderDashboard(currentData);
-            showToast('✅ Sample data loaded! Explore the dashboard.');
-            document.getElementById('uploadCard').style.display = 'none';
-            document.getElementById('dashboard').classList.add('active');
+        function getTrafficLevel(r) {
+            const vol = getVolume(r);
+            if (vol === 0) return 'NONE';
+            const { high, med } = getTrafficCutoffs();
+            if (vol >= high) return 'HIGH';
+            if (vol >= med) return 'MED';
+            return 'LOW';
         }
 
-        function downloadSampleCSV() {
-            const headers = ['store','address','city','province','zone','status','volume','volPriority','traffic','trend','reject7d','impact','tem','paper','uptime','bin','serviceDays','lastTx','version','revenue','loss'];
-            const data = getSampleData();
-            let csv = headers.join(',') + '\\n';
-            data.forEach(row => {
-                csv += headers.map(h => row[h] !== undefined ? row[h] : '').join(',') + '\\n';
+        function getTrafficBadge(r) {
+            const lvl = getTrafficLevel(r);
+            if (lvl === 'HIGH') return '<span class="badge" style="background:#dc2626; color:white;">HIGH</span>';
+            if (lvl === 'MED') return '<span class="badge" style="background:#f59e0b; color:white;">MED</span>';
+            if (lvl === 'NONE') return '<span class="badge" style="background:#94a3b8; color:white;">NONE</span>';
+            return '<span class="badge" style="background:#10b981; color:white;">LOW</span>';
+        }
+
+        function getImpactScore(r) { return getVolume(r) * (getReject7d(r) / 100); }
+
+        function isHighImpact(r) { return getImpactScore(r) > HIGH_IMPACT_THRESHOLD; }
+
+        function getPaperAlert(r) {
+            let v = getVPO(r);
+            if (!v || v === 'N/A' || v === '—') return '—';
+            try {
+                let parts = v.match(/(\d{2})\/(\d{2})\/(\d{2})/);
+                if (parts) {
+                    let date = new Date(2000 + parseInt(parts[3]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                    let days = Math.ceil((date - new Date()) / (86400000));
+                    if (days <= 0) return '🔴 EXPIRED';
+                    if (days <= PAPER_WARNING_DAYS) return '🟡 ' + days + 'd';
+                    return '✅ ' + days + 'd';
+                }
+            } catch (e) {}
+            return v;
+        }
+
+        function getDaysSinceService(r) {
+            let d = getLastServiceDate(r);
+            if (!d || d === '—') return null;
+            try {
+                let parts = d.match(/(\d{2})\/(\d{2})\/(\d{2})/);
+                if (parts) {
+                    let date = new Date(2000 + parseInt(parts[3]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                    return Math.ceil((new Date() - date) / 86400000);
+                }
+            } catch (e) {}
+            return null;
+        }
+
+        function isServiceOverdue(r) { let days = getDaysSinceService(r); return days !== null && days >
+                SERVICE_OVERDUE_DAYS; }
+
+        function getEstRevenue(r) { return getVolume(r) * TRANSACTION_VALUE; }
+
+        function calcLossFromReject(r) { return getVolume(r) * (getReject7d(r) / 100) * TRANSACTION_VALUE; }
+
+        function calcLossFromDowntime(r) { return getVolume(r) * ((100 - getUptime7d(r)) / 100) * 0.8 *
+            TRANSACTION_VALUE; }
+
+        function calcDailyLoss(r) { return calcLossFromReject(r) + calcLossFromDowntime(r); }
+
+        function calculateVolumePriorities() {
+            if (!allData.length) return;
+            const sorted = [...allData].sort((a, b) => getVolume(b) - getVolume(a));
+            const total = sorted.length;
+            const highCutoff = Math.ceil(total * 0.33);
+            const midCutoff = Math.ceil(total * 0.66);
+            sorted.forEach((r, idx) => {
+                const id = getStoreId(r);
+                if (idx < highCutoff) volPriorityMap.set(id, 'High');
+                else if (idx < midCutoff) volPriorityMap.set(id, 'Mid');
+                else volPriorityMap.set(id, 'Low');
             });
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = 'sample-asset-data.csv';
-            link.click();
         }
 
-        // ============================================
-        // FILE UPLOAD
-        // ============================================
-        function handleFileUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                const text = e.target.result;
-                const lines = text.split('\\n').filter(line => line.trim());
-                if (lines.length < 2) {
-                    alert('The CSV file appears to be empty or invalid.');
-                    return;
-                }
-                
-                const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-                const data = [];
-                for (let i = 1; i < lines.length; i++) {
-                    const values = lines[i].split(',').map(v => v.trim());
-                    const row = {};
-                    headers.forEach((h, idx) => {
-                        row[h] = values[idx] || '';
-                    });
-                    data.push(row);
-                }
-                
-                currentData = data;
-                renderDashboard(data);
-                showToast('✅ ' + file.name + ' uploaded successfully!');
-                document.getElementById('uploadCard').style.display = 'none';
-                document.getElementById('dashboard').classList.add('active');
+        function getVolumePriority(r) { return volPriorityMap.get(getStoreId(r)) || 'Low'; }
+
+        function getVolumeBadge(r) {
+            let p = getVolumePriority(r);
+            if (p === 'High') return '<span class="badge" style="background:#dc2626; color:white;">HIGH</span>';
+            if (p === 'Mid') return '<span class="badge" style="background:#f59e0b; color:white;">MID</span>';
+            return '<span class="badge" style="background:#10b981; color:white;">LOW</span>';
+        }
+
+        function getVolumeTrend(r) {
+            let v1 = getVolume(r),
+                v7 = getVolume7DayAvg(r);
+            if (v7 === 0) return 'flat';
+            let ch = ((v1 - v7) / v7) * 100;
+            if (ch > 5) return 'up';
+            if (ch < -5) return 'down';
+            return 'flat';
+        }
+
+        function getTrendDisplay(r) {
+            let t = getVolumeTrend(r);
+            let v1 = getVolume(r),
+                v7 = getVolume7DayAvg(r);
+            let p = v7 === 0 ? 0 : ((v1 - v7) / v7) * 100;
+            let a = Math.abs(p).toFixed(0);
+            if (t === 'up') return '<span class="badge" style="background:#10b981;">📈 +' + a + '%</span>';
+            if (t === 'down') return '<span class="badge" style="background:#dc2626;">📉 -' + a + '%</span>';
+            return '<span class="badge" style="background:#64748b;">➡️ 0%</span>';
+        }
+
+        // Notes
+        function getNotesKey(id) { return 'kiosk_notes_' + id; }
+
+        function loadNotes(id) {
+            let s = localStorage.getItem(getNotesKey(id));
+            if (!s) return [];
+            try { return JSON.parse(s).filter(n => new Date(n.date).getTime() > Date.now() - 30 * 24 * 60 * 60 *
+                    1000); } catch (e) { return []; }
+        }
+
+        function saveNote(id, txt) {
+            if (!txt.trim()) return;
+            let notes = loadNotes(id);
+            notes.unshift({ id: Date.now().toString(), text: txt.trim(), date: new Date().toISOString(),
+                formattedDate: new Date().toLocaleString() });
+            localStorage.setItem(getNotesKey(id), JSON.stringify(notes));
+        }
+
+        function openNotesModal(id, name) {
+            let notes = loadNotes(id);
+            let div = document.getElementById('notesList');
+            if (!notes.length) div.innerHTML = '<div>No notes yet</div>';
+            else div.innerHTML = notes.map(n => `<div><strong>${escapeHtml(n.text)}</strong><br><small>${escapeHtml(n
+                        .formattedDate)}</small></div>`).join('');
+            document.getElementById('notesModal').style.display = 'flex';
+            document.getElementById('newNoteInput').value = '';
+            document.getElementById('saveNewNoteBtn').onclick = () => {
+                let txt = document.getElementById('newNoteInput').value;
+                if (txt.trim()) saveNote(id, txt);
+                refreshNotesModal(id);
             };
-            reader.readAsText(file);
         }
 
-        // ============================================
-        // RENDER DASHBOARD
-        // ============================================
-        function renderDashboard(data) {
-            if (!data || data.length === 0) return;
-            
-            // Update timestamp
-            document.getElementById('dataTime').textContent = new Date().toLocaleString();
-            
-            // KPI
-            const totalRevenue = data.reduce((sum, r) => sum + (parseFloat(r.revenue) || 0), 0);
-            const totalLoss = data.reduce((sum, r) => sum + (parseFloat(r.loss) || 0), 0);
-            const avgUptime = data.reduce((sum, r) => sum + (parseFloat(r.uptime) || 0), 0) / data.length;
-            const onlineCount = data.filter(r => r.status && r.status.toLowerCase() === 'online').length;
-            
-            document.getElementById('kpiGrid').innerHTML = `
-                <div class="kpi-card"><div class="value">$${formatNumber(totalRevenue)}</div><div class="label">Total Revenue</div></div>
-                <div class="kpi-card"><div class="value loss">$${formatNumber(totalLoss)}</div><div class="label">Total Loss</div></div>
-                <div class="kpi-card"><div class="value">${avgUptime.toFixed(1)}%</div><div class="label">Avg Uptime</div></div>
-                <div class="kpi-card"><div class="value">${onlineCount}/${data.length}</div><div class="label">Online</div></div>
-            `;
-            
-            // Table
-            const tbody = document.getElementById('tableBody');
-            tbody.innerHTML = data.map(row => {
-                const status = row.status || 'Unknown';
-                const cls = status.toLowerCase() === 'critical' ? 'critical' : status.toLowerCase() === 'warning' ? 'warning' : '';
-                return `<tr class="${cls}">
-                    <td>${row.store || '-'}</td>
-                    <td>${row.city || '-'}</td>
-                    <td>${row.province || row.region || '-'}</td>
-                    <td>${status}</td>
-                    <td>${row.uptime || '-'}%</td>
-                    <td>$${formatNumber(row.loss || 0)}</td>
-                </tr>`;
-            }).join('');
-            
-            // Chart
-            const ctx = document.getElementById('lossChart').getContext('2d');
-            if (chartInstance) chartInstance.destroy();
-            
-            const regionData = {};
-            data.forEach(row => {
-                const region = row.province || row.region || 'Unknown';
-                regionData[region] = (regionData[region] || 0) + (parseFloat(row.loss) || 0);
-            });
-            
-            chartInstance = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: Object.keys(regionData),
-                    datasets: [{
-                        label: 'Daily Loss ($)',
-                        data: Object.values(regionData),
-                        backgroundColor: 'rgba(220, 38, 38, 0.6)',
-                        borderColor: 'rgba(220, 38, 38, 1)',
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    plugins: { legend: { display: false } },
-                    scales: { y: { beginAtZero: true } }
+        function refreshNotesModal(id) {
+            let store = allData.find(r => getStoreId(r) === id);
+            openNotesModal(id, store ? store.Store : 'Asset');
+        }
+
+        function closeNotesModal() { document.getElementById('notesModal').style.display = 'none'; }
+
+        function closeModal() { document.getElementById('instructionModal').style.display = 'none'; }
+
+        function showToast(m) {
+            let t = document.getElementById('toast');
+            t.textContent = m;
+            t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 2000);
+        }
+
+        function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;',
+                '>': '&gt;' })[m]); }
+
+        // Map
+        function getMapColor(r) {
+            let l = getStatusLevel(r);
+            if (l === 'Offline') return '#6b7280';
+            if (l === 'Critical') return '#dc2626';
+            if (l === 'Warning') return '#f59e0b';
+            return '#10b981';
+        }
+
+        function updateMapHighlights() {
+            if (!map) return;
+            map.eachLayer(layer => {
+                if (layer instanceof L.CircleMarker && layer.options.storeId) {
+                    let sid = layer.options.storeId;
+                    if (selectedKiosks.has(sid)) {
+                        layer.setStyle({ fillColor: '#3b82f6', color: '#fff', weight: 3 });
+                    } else {
+                        layer.setStyle({ fillColor: layer.options.originalColor, color: '#fff', weight: 2 });
+                    }
                 }
             });
+            refreshSelectionPanel();
+            updateSelectedSummary();
         }
 
-        function formatNumber(num) {
-            if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
-            return num.toFixed(0);
+        function initMap() {
+            if (map) map.remove();
+            map = L.map('map').setView([56.1304, -106.3468], 4);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { attribution: 'OSM' }).addTo(
+                map);
+            let filtered = filterData();
+            let bounds = [];
+            filtered.forEach(r => {
+                let lat = parseFloat(r.Latitude);
+                let lng = parseFloat(r.Longitude);
+                if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+                    let col = getMapColor(r);
+                    let sid = getStoreId(r);
+                    let sel = selectedKiosks.has(sid);
+                    let marker = L.circleMarker([lat, lng], {
+                        radius: 8,
+                        fillColor: sel ? '#3b82f6' : col,
+                        color: '#fff',
+                        weight: sel ? 3 : 2,
+                        storeId: sid,
+                        originalColor: col
+                    }).addTo(map);
+                    marker.on('click', () => {
+                        if (selectedKiosks.has(sid)) {
+                            selectedKiosks.delete(sid);
+                            marker.setStyle({ fillColor: col, weight: 2 });
+                        } else {
+                            selectedKiosks.add(sid);
+                            marker.setStyle({ fillColor: '#3b82f6', weight: 3 });
+                        }
+                        updateTableCheckboxes();
+                        updateSelectAllCheckbox();
+                        updateMapHighlights();
+                    });
+                    marker.bindPopup(
+                        `<b>${escapeHtml(r.Store)}</b><br>${escapeHtml(r.Address)}<br>Loss: $${calcDailyLoss(r).toFixed(0)}`
+                        );
+                    bounds.push([lat, lng]);
+                }
+            });
+            if (bounds.length) map.fitBounds(bounds);
+            else map.fitBounds([
+                [42, -79],
+                [50, -60]
+            ]);
+            setTimeout(() => map.invalidateSize(), 50);
         }
 
-        // ============================================
-        // RESET
-        // ============================================
-        function resetDashboard() {
-            if (confirm('Reset the dashboard? You\'ll need to upload data again.')) {
-                document.getElementById('dashboard').classList.remove('active');
-                document.getElementById('uploadCard').style.display = 'block';
-                document.getElementById('csvFile').value = '';
-                currentData = [];
-                if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
-                document.getElementById('kpiGrid').innerHTML = '';
-                document.getElementById('tableBody').innerHTML = '';
+        function refreshSelectionPanel() {
+            const container = document.getElementById('selectedList');
+            if (!selectedKiosks.size) {
+                container.innerHTML = 'None selected. Click markers or checkboxes.';
+                return;
+            }
+            let html = '';
+            for (let sid of selectedKiosks) {
+                const k = allData.find(r => getStoreId(r) === sid);
+                if (k) {
+                    html += `<div class="selected-item">
+                <span><strong>${escapeHtml(k.Store)}</strong><br><small>${escapeHtml(k.Address||'')}</small></span>
+                <button onclick="selectedKiosks.delete('${sid}'); toggleKioskSelection('${sid}', false);">✕</button>
+              </div>`;
+                }
+            }
+            container.innerHTML = html;
+        }
+
+        function updateSelectedSummary() {
+            const el = document.getElementById('selectedSummary');
+            if (!el) return;
+            const count = selectedKiosks.size;
+            if (count) {
+                const withCoords = [...selectedKiosks].filter(sid => {
+                    const k = allData.find(r => getStoreId(r) === sid);
+                    return k && k.Latitude && k.Longitude;
+                }).length;
+                el.textContent =
+                    `🟢 ${count} asset${count>1?'s':''} selected | 📍 ${withCoords} with coordinates | 🗺️ Ready to route`;
+            } else {
+                el.textContent = '';
             }
         }
 
-        // ============================================
-        // TOAST
-        // ============================================
-        function showToast(message) {
-            const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.style.display = 'block';
-            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        // CSV parsing
+        function parseCSV(text) {
+            const lines = text.split(/\r?\n/);
+            if (lines.length < 2) return false;
+            let headers = lines[0].split(',').map(h => h.replace(/^\uFEFF/, '').replace(/"/g, '').trim());
+            let data = [];
+            for (let i = 1; i < lines.length; i++) {
+                if (!lines[i].trim()) continue;
+                let row = {},
+                    inQ = false,
+                    cur = '',
+                    col = 0;
+                for (let ch of lines[i]) {
+                    if (ch === '"') inQ = !inQ;
+                    else if (ch === ',' && !inQ) { row[headers[col]] = cur.trim().replace(/"/g, '');
+                        cur = '';
+                        col++; } else cur += ch;
+                }
+                if (col < headers.length) row[headers[col]] = cur.trim().replace(/"/g, '');
+                if (Object.keys(row).length) data.push(row);
+            }
+            if (!data.length) return false;
+            allData = data.filter(row => isCanadian(row)).map(row => ({
+                Store: row.Store || row['Store Name'] || 'Unknown',
+                Address: row.Address || '',
+                City: row.City || '',
+                Province: row.State || row.Province || '',
+                KioskState: row['Kiosk State'] || row.State || 'Attract',
+                Tx1Day: row['1 Day TX'] || row.Volume || '0',
+                Tx7Day: row['7 Day TX'] || '0',
+                Reject7Day: row['7 Day Reject %'] || row.Reject7Day || row['1 Day Reject %'] || '0',
+                Uptime1Day: row['1 Day Uptime %'] || '100',
+                Uptime7Day: row['7 Day Uptime %'] || row.Uptime || '100',
+                BinFull: row['Total Bin Full %'] || row['Bin Full %'] || '0',
+                LastPM: row['Last PM Date'] || row['Last Service Date'] || '',
+                Phone: row['Store Phone Number'] || row.Phone || '',
+                TEMM7Day: row['7 Day TEMM'] || row.TEMM || '0',
+                VPO: row.VPO || row.VPO || '',
+                LastTXDate: row['Last TX Date'] || '',
+                Version: row.Version || row.Version || '',
+                Latitude: row.Latitude || '',
+                Longitude: row.Longitude || '',
+                Zone: row['FT Zone'] || row.District || row.Zone || ''
+            }));
+            calculateVolumePriorities();
+            currentRoute = null;
+            return true;
         }
+
+        // Filtering & Sorting
+        function applyPriorityFilter(data, type) {
+            if (type === 'all') return data;
+            if (type === 'urgent') return data.filter(r => isHighImpact(r));
+            if (type === 'high-reject') return data.filter(r => getReject7d(r) >= 4);
+            if (type === 'full-bin') return data.filter(r => parseFloat(r.BinFull || 0) > 80);
+            if (type === 'paper-out') return data.filter(r => { let a = getPaperAlert(r); return a.includes('🟡') || a
+                    .includes('🔴'); });
+            if (type === 'overdue') return data.filter(r => isServiceOverdue(r));
+            if (type === 'high-tem') return data.filter(r => getTEMM(r) >= HIGH_TEM_THRESHOLD);
+            if (type === 'high-volume') return data.filter(r => getVolumePriority(r) === 'High');
+            if (type === 'call-first') return data.filter(r => r.KioskState === 'Offline');
+            return data;
+        }
+
+        function filterData() {
+            let f = [...allData];
+            f = applyPriorityFilter(f, currentPriorityFilter);
+            let prov = document.getElementById('regionFilter')?.value || 'all';
+            if (prov !== 'all') f = f.filter(r => getRegion(r) === prov);
+            let zone = document.getElementById('zoneFilter')?.value || 'all';
+            if (zone !== 'all') f = f.filter(r => getZone(r) === zone);
+            let stat = document.getElementById('riskFilter')?.value || 'all';
+            if (stat === 'critical') f = f.filter(r => getStatusLevel(r) === 'Critical');
+            else if (stat === 'warning') f = f.filter(r => getStatusLevel(r) === 'Warning');
+            else if (stat === 'good') f = f.filter(r => getStatusLevel(r) === 'Good');
+            let volPri = document.getElementById('volumePriorityFilter')?.value || 'all';
+            if (volPri !== 'all') f = f.filter(r => getVolumePriority(r) === volPri);
+            let s = document.getElementById('searchInput')?.value.toLowerCase() || '';
+            if (s) f = f.filter(r => (r.Store || '').toLowerCase().includes(s) || (r.City || '').toLowerCase().includes(
+                s) || (r.Address || '').toLowerCase().includes(s));
+            return f;
+        }
+
+        const priorityOrder = { 'High': 3, 'Mid': 2, 'Low': 1 };
+        const trafficOrder = { 'HIGH': 3, 'MED': 2, 'LOW': 1, 'NONE': 0 };
+
+        function sortData(d) {
+            return [...d].sort((a, b) => {
+                let va, vb;
+                switch (currentSort.column) {
+                    case 'store':
+                        va = (a.Store || '').toLowerCase();
+                        vb = (b.Store || '').toLowerCase();
+                        break;
+                    case 'address':
+                        va = (a.Address || '').toLowerCase();
+                        vb = (b.Address || '').toLowerCase();
+                        break;
+                    case 'city':
+                        va = (a.City || '').toLowerCase();
+                        vb = (b.City || '').toLowerCase();
+                        break;
+                    case 'province':
+                        va = getRegion(a);
+                        vb = getRegion(b);
+                        break;
+                    case 'zone':
+                        va = getZone(a);
+                        vb = getZone(b);
+                        break;
+                    case 'status':
+                        va = (a.KioskState || '');
+                        vb = (b.KioskState || '');
+                        break;
+                    case 'volume':
+                        va = getVolume(a);
+                        vb = getVolume(b);
+                        break;
+                    case 'volPriority':
+                        va = priorityOrder[getVolumePriority(a)] || 0;
+                        vb = priorityOrder[getVolumePriority(b)] || 0;
+                        break;
+                    case 'traffic':
+                        va = trafficOrder[getTrafficLevel(a)] || 0;
+                        vb = trafficOrder[getTrafficLevel(b)] || 0;
+                        break;
+                    case 'trend':
+                        va = ((getVolume(a) - getVolume7DayAvg(a)) / (getVolume7DayAvg(a) || 1)) * 100;
+                        vb = ((getVolume(b) - getVolume7DayAvg(b)) / (getVolume7DayAvg(b) || 1)) * 100;
+                        break;
+                    case 'reject7d':
+                        va = getReject7d(a);
+                        vb = getReject7d(b);
+                        break;
+                    case 'impact':
+                        va = getImpactScore(a);
+                        vb = getImpactScore(b);
+                        break;
+                    case 'tem':
+                        va = getTEMM(a);
+                        vb = getTEMM(b);
+                        break;
+                    case 'paper':
+                        va = getPaperAlert(a);
+                        vb = getPaperAlert(b);
+                        break;
+                    case 'uptime':
+                        va = getUptime7d(a);
+                        vb = getUptime7d(b);
+                        break;
+                    case 'bin':
+                        va = parseFloat(a.BinFull || 0);
+                        vb = parseFloat(b.BinFull || 0);
+                        break;
+                    case 'serviceDays':
+                        va = getDaysSinceService(a) || 0;
+                        vb = getDaysSinceService(b) || 0;
+                        break;
+                    case 'lastTx':
+                        va = a.LastTXDate || '';
+                        vb = b.LastTXDate || '';
+                        break;
+                    case 'version':
+                        va = a.Version || '';
+                        vb = b.Version || '';
+                        break;
+                    case 'revenue':
+                        va = getEstRevenue(a);
+                        vb = getEstRevenue(b);
+                        break;
+                    case 'loss':
+                        va = calcDailyLoss(a);
+                        vb = calcDailyLoss(b);
+                        break;
+                    default:
+                        va = calcDailyLoss(a);
+                        vb = calcDailyLoss(b);
+                }
+                if (typeof va === 'number') return currentSort.direction === 'desc' ? vb - va : va - vb;
+                return currentSort.direction === 'desc' ? String(vb).localeCompare(String(va)) : String(va)
+                    .localeCompare(String(vb));
+            });
+        }
+
+        function updateTableCheckboxes() {
+            document.querySelectorAll('.kiosk-checkbox').forEach(cb => {
+                let sid = cb.getAttribute('data-storeid');
+                cb.checked = selectedKiosks.has(sid);
+                let row = cb.closest('tr');
+                if (row) row.classList.toggle('selected-row', selectedKiosks.has(sid));
+            });
+            updateSelectAllCheckbox();
+            refreshSelectionPanel();
+            updateSelectedSummary();
+        }
+
+        function updateSelectAllCheckbox() {
+            let sa = document.getElementById('selectAllCheckbox');
+            if (!sa) return;
+            let cbs = document.querySelectorAll('.kiosk-checkbox');
+            sa.checked = cbs.length > 0 && Array.from(cbs).every(cb => cb.checked);
+        }
+
+        function selectAllKiosks() {
+            let sa = document.getElementById('selectAllCheckbox');
+            let chk = sa.checked;
+            document.querySelectorAll('.kiosk-checkbox').forEach(cb => {
+                cb.checked = chk;
+                let sid = cb.getAttribute('data-storeid');
+                if (chk) selectedKiosks.add(sid);
+                else selectedKiosks.delete(sid);
+                let row = cb.closest('tr');
+                if (row) row.classList.toggle('selected-row', chk);
+            });
+            updateMapHighlights();
+        }
+        window.toggleKioskSelection = function(sid, chk) {
+            if (chk) selectedKiosks.add(sid);
+            else selectedKiosks.delete(sid);
+            const row = document.querySelector(`.kiosk-checkbox[data-storeid="${sid}"]`)?.closest('tr');
+            if (row) row.classList.toggle('selected-row', chk);
+            updateMapHighlights();
+            updateSelectAllCheckbox();
+        };
+
+        // Charts & KPIs
+        function updateProvinceChart(data) {
+            if (currentMode !== 'office') return;
+            let pR = {},
+                pD = {};
+            data.forEach(r => {
+                let p = getRegion(r);
+                if (p && p !== 'Unknown') {
+                    pR[p] = (pR[p] || 0) + calcLossFromReject(r);
+                    pD[p] = (pD[p] || 0) + calcLossFromDowntime(r);
+                }
+            });
+            let all = [...new Set([...Object.keys(pR), ...Object.keys(pD)])];
+            let sorted = all.map(p => ({ prov: p, total: (pR[p] || 0) + (pD[p] || 0) })).sort((a, b) => b.total - a.total);
+            if (lossChart) lossChart.destroy();
+            lossChart = new Chart(document.getElementById('lossChart'), {
+                type: 'bar',
+                data: {
+                    labels: sorted.map(p => p.prov),
+                    datasets: [
+                        { label: 'Rejected', data: sorted.map(p => pR[p.prov] || 0),
+                            backgroundColor: '#dc2626' },
+                        { label: 'Downtime', data: sorted.map(p => pD[p.prov] || 0),
+                            backgroundColor: '#f97316' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    onClick: (e, active) => {
+                        if (active.length) {
+                            let prov = sorted[active[0].index].prov;
+                            document.getElementById('regionFilter').value = prov;
+                            renderAll();
+                        }
+                    },
+                    scales: { y: { ticks: { callback: v => '$' + v } } }
+                }
+            });
+        }
+
+        function updateTopLossList(data) {
+            if (currentMode !== 'office') return;
+            let sorted = [...data].sort((a, b) => calcDailyLoss(b) - calcDailyLoss(a)).slice(0, 10);
+            let cont = document.getElementById('topLossList');
+            if (!sorted.length) { cont.innerHTML = '<div>No data</div>'; return; }
+            cont.innerHTML = sorted.map((r, idx) => `
+        <div class="top-loss-item" onclick="document.getElementById('searchInput').value='${escapeHtml(r.Store)}';renderAll();">
+            <div><strong>#${idx+1} ${escapeHtml(r.Store)}</strong><br><small>${getVolume(r)} tx/day</small></div>
+            <div style="color:#dc2626;">$${calcDailyLoss(r).toFixed(0)}/day</div>
+        </div>`).join('');
+        }
+
+        function computeFleetHealth() {
+            if (!allData.length) return 0;
+            let avgUptime = allData.reduce((s, r) => s + getUptime7d(r), 0) / allData.length;
+            let criticalPct = allData.filter(r => getStatusLevel(r) === 'Critical').length / allData.length;
+            let offlinePct = allData.filter(r => r.KioskState === 'Offline').length / allData.length;
+            let score = (avgUptime * 0.5) + ((1 - criticalPct) * 0.3) + ((1 - offlinePct) * 0.2);
+            return Math.min(100, Math.max(0, Math.round(score)));
+        }
+
+        function updatePriorityButtonCounts() {
+            if (!allData.length) return;
+            let filtered = filterData();
+            const counts = {
+                all: filtered.length,
+                urgent: filtered.filter(r => isHighImpact(r)).length,
+                'high-reject': filtered.filter(r => getReject7d(r) >= 4).length,
+                'full-bin': filtered.filter(r => parseFloat(r.BinFull || 0) > 80).length,
+                'paper-out': filtered.filter(r => { let a = getPaperAlert(r); return a.includes('🟡') || a.includes(
+                        '🔴'); }).length,
+                overdue: filtered.filter(r => isServiceOverdue(r)).length,
+                'high-tem': filtered.filter(r => getTEMM(r) >= HIGH_TEM_THRESHOLD).length,
+                'high-volume': filtered.filter(r => getVolumePriority(r) === 'High').length,
+                'call-first': filtered.filter(r => r.KioskState === 'Offline').length
+            };
+            const labels = {
+                all: '📊 All',
+                urgent: '🔥 High Impact',
+                'high-reject': '⚠️ High Reject',
+                'full-bin': '🗑️ Full Bin',
+                'paper-out': '📄 Paper Low',
+                overdue: '📅 Service Overdue',
+                'high-tem': '🔧 High TEMM',
+                'high-volume': '📊 High Volume',
+                'call-first': '📞 Call First'
+            };
+            for (let [key, label] of Object.entries(labels)) {
+                let btn = document.querySelector(`.priority-btn[data-filter="${key}"]`);
+                if (btn) btn.innerText = `${label} (${counts[key]||0})`;
+            }
+        }
+
+        // Render all
+        function renderAll() {
+            if (!allData.length) return;
+            let f = filterData();
+            f = sortData(f);
+            const total = f.length,
+                crit = f.filter(r => getStatusLevel(r) === 'Critical').length,
+                warn = f.filter(r => getStatusLevel(r) === 'Warning').length,
+                off = f.filter(r => r.KioskState === 'Offline').length,
+                binA = f.filter(r => parseFloat(r.BinFull || 0) > 80).length,
+                highVolCount = f.filter(r => getVolumePriority(r) === 'High').length;
+            const tLoss = f.reduce((s, r) => s + calcDailyLoss(r), 0),
+                tRev = f.reduce((s, r) => s + getEstRevenue(r), 0),
+                net = tRev - tLoss,
+                up7d = f.reduce((s, r) => s + getUptime7d(r), 0) / (f.length || 1);
+            const health = computeFleetHealth();
+            const healthColor = health >= 80 ? '#10b981' : health >= 60 ? '#f59e0b' : '#dc2626';
+            if (currentMode === 'office') {
+                document.getElementById('fleetHealth').innerHTML = `
+            <div class="health-score-circle" style="background:${healthColor};">${health}</div>
+            <div>
+                <div style="font-weight:700; font-size:1.2rem;">Fleet Health Score</div>
+                <div style="color:#64748b; font-size:0.85rem;">Uptime · Critical rate · Offline ratio</div>
+                <div style="margin-top:8px;">
+                    <span style="color:#dc2626;">${crit} critical</span> · 
+                    <span style="color:#f59e0b;">${warn} warning</span> · 
+                    <span>${off} offline</span>
+                </div>
+            </div>`;
+                document.getElementById('kpiGrid').innerHTML = `
+            <div class="kpi-card"><div class="kpi-label">📊 Total Assets</div><div class="kpi-value">${total}</div></div>
+            <div class="kpi-card"><div class="kpi-label">🔴 Critical</div><div class="kpi-value" style="color:#dc2626;">${crit}</div></div>
+            <div class="kpi-card"><div class="kpi-label">🟡 Warning</div><div class="kpi-value" style="color:#f59e0b;">${warn}</div></div>
+            <div class="kpi-card"><div class="kpi-label">📞 Offline</div><div class="kpi-value" style="color:#6b7280;">${off}</div></div>
+            <div class="kpi-card"><div class="kpi-label">📊 High Volume</div><div class="kpi-value">${highVolCount}</div></div>
+            <div class="kpi-card"><div class="kpi-label">📡 7-Day Uptime</div><div class="kpi-value">${up7d.toFixed(1)}%</div></div>
+            <div class="kpi-card"><div class="kpi-label">💰 Est. Revenue</div><div class="kpi-value">$${tRev.toFixed(0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">💸 Daily Loss</div><div class="kpi-value kpi-loss">$${tLoss.toFixed(0)}</div></div>
+            <div class="kpi-card"><div class="kpi-label">📈 Net Revenue</div><div class="kpi-value">$${net.toFixed(0)}</div></div>`;
+                updateProvinceChart(f);
+                updateTopLossList(f);
+            }
+            document.getElementById('alertBar').innerHTML = `
+        <span>⚠️ ${crit} critical | ${warn} warning | ${off} offline | ${binA} full bins | ${highVolCount} high volume</span>
+        <button onclick="document.getElementById('riskFilter').value='critical'; renderAll();">View Critical</button>`;
+            updatePriorityButtonCounts();
+            const tbody = document.getElementById('tableBody');
+            if (!f.length) { tbody.innerHTML = '<tr><td colspan="24">No assets</td></tr>'; return; }
+            tbody.innerHTML = f.map(r => {
+                const sid = getStoreId(r),
+                    name = r.Store || '—',
+                    phone = getPhoneNumber(r);
+                const callBtn = phone ?
+                    `<button class="call-btn" onclick="window.location.href='tel:${phone}'">📞</button>` : '';
+                const uptime = getUptime7d(r),
+                    volume = getVolume(r),
+                    loss = calcDailyLoss(r),
+                    reject = getReject7d(r);
+                const statusClass = getStatusLevel(r) === 'Critical' ? 'critical-row' : getStatusLevel(r) ===
+                    'Warning' ? 'warning-row' : '';
+                return `<tr class="${statusClass} ${selectedKiosks.has(sid)?'selected-row':''}">
+            <td><input type="checkbox" class="kiosk-checkbox" data-storeid="${escapeHtml(sid)}" ${selectedKiosks.has(sid)?'checked':''} onclick="toggleKioskSelection('${escapeHtml(sid)}', this.checked)"></td>
+            <td><span class="notes-icon" onclick="openNotesModal('${escapeHtml(sid)}','${escapeHtml(name)}')">📝</span> ${escapeHtml(name)}${callBtn}</td>
+            <td>${escapeHtml(r.Address||'—')}</td>
+            <td>${escapeHtml(r.City||'—')}</td>
+            <td>${getRegion(r)}</td>
+            <td>${escapeHtml(getZone(r))}</td>
+            <td>${r.KioskState||'Attract'}</td>
+            <td>${volume}</td>
+            <td>${getVolumeBadge(r)}</td>
+            <td>${getTrafficBadge(r)}</td>
+            <td>${getTrendDisplay(r)}</td>
+            <td style="color:${reject>=8?'#dc2626':reject>=4?'#f59e0b':'#16a34a'}; font-weight:600;">${reject.toFixed(1)}%</td>
+            <td>${getImpactScore(r).toFixed(2)}</td>
+            <td>${getTEMM(r)}</td>
+            <td>${getPaperAlert(r)}</td>
+            <td>${uptime.toFixed(1)}%</td>
+            <td>${parseFloat(r.BinFull||0).toFixed(0)}%</td>
+            <td>${getDaysSinceService(r)||'—'}</td>
+            <td>${r.LastTXDate||'—'}</td>
+            <td>${r.Version||'—'}</td>
+            <td>$${getEstRevenue(r).toFixed(0)}</td>
+            <td style="color:#dc2626;">$${loss.toFixed(0)}</td>
+            <td>${getStatusLabel(r)}</td>
+            <td>${callBtn}</td>
+          </tr>`;
+            }).join('');
+            updateTableCheckboxes();
+            refreshSelectionPanel();
+            setTimeout(initMap, 100);
+        }
+
+        // Mode switching
+        function setMode(mode) {
+            currentMode = mode;
+            const dash = document.getElementById('dashboard');
+            dash.classList.remove('field-mode', 'office-mode');
+            dash.classList.add(mode + '-mode');
+            document.getElementById('fieldModeBtn').classList.toggle('active', mode === 'field');
+            document.getElementById('officeModeBtn').classList.toggle('active', mode === 'office');
+            if (mode === 'office') {
+                renderAll();
+            } else {
+                if (map) setTimeout(() => map.invalidateSize(), 100);
+            }
+            document.getElementById('map').style.display = 'block';
+            document.querySelector('.map-legend').style.display = 'flex';
+            updateSelectedSummary();
+        }
+
+        // Filters setup
+        function populateFilters() {
+            const regions = [...new Set(allData.map(r => getRegion(r)))].filter(r => r && r !== 'Unknown');
+            const zones = [...new Set(allData.map(r => getZone(r)))].filter(z => z && z !== '—');
+            document.getElementById('regionFilter').innerHTML = '<option value="all">All</option>' + regions.sort().map(
+                p => `<option value="${p}">${p}</option>`).join('');
+            document.getElementById('zoneFilter').innerHTML = '<option value="all">All</option>' + zones.sort().map(z =>
+                `<option value="${z}">${z}</option>`).join('');
+            ['regionFilter', 'zoneFilter', 'riskFilter', 'volumePriorityFilter'].forEach(id => {
+                document.getElementById(id).onchange = () => renderAll();
+            });
+            document.getElementById('searchInput').oninput = () => renderAll();
+            document.getElementById('resetBtn').onclick = () => {
+                document.getElementById('regionFilter').value = 'all';
+                document.getElementById('zoneFilter').value = 'all';
+                document.getElementById('riskFilter').value = 'all';
+                document.getElementById('volumePriorityFilter').value = 'all';
+                document.getElementById('searchInput').value = '';
+                currentPriorityFilter = 'all';
+                document.querySelectorAll('.priority-btn').forEach(b => b.classList.remove('active'));
+                document.querySelector('.priority-btn[data-filter="all"]')?.classList.add('active');
+                currentRoute = null;
+                document.getElementById('routeSummary').style.display = 'none';
+                renderAll();
+            };
+        }
+
+        function setupSorting() {
+            document.querySelectorAll('#dataTable th').forEach(th => {
+                if (!th.getAttribute('data-sort')) return;
+                th.addEventListener('click', () => {
+                    const k = th.getAttribute('data-sort');
+                    if (currentSort.column === k) currentSort.direction = currentSort.direction === 'desc' ?
+                        'asc' : 'desc';
+                    else { currentSort.column = k;
+                        currentSort.direction = 'desc'; }
+                    renderAll();
+                });
+            });
+        }
+
+        function setupPriorityButtons() {
+            document.querySelectorAll('.priority-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.priority-btn').forEach(b => b.classList.remove(
+                    'active'));
+                    btn.classList.add('active');
+                    currentPriorityFilter = btn.getAttribute('data-filter');
+                    renderAll();
+                });
+            });
+        }
+
+        // Route Planner
+        async function geocode(addr) {
+            try {
+                let res = await fetch(
+                    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addr)}&limit=1`);
+                let data = await res.json();
+                if (data && data.length) return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+            } catch (e) {}
+            return null;
+        }
+
+        function haversine(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180,
+                dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(
+                dLon / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        function optimizeRoute(start, stops) {
+            if (!stops.length) return [];
+            let unv = [...stops],
+                route = [],
+                cur = start;
+            while (unv.length) {
+                let idx = 0,
+                    dist = haversine(cur.lat, cur.lon, unv[0].coord.lat, unv[0].coord.lon);
+                for (let i = 1; i < unv.length; i++) {
+                    let d = haversine(cur.lat, cur.lon, unv[i].coord.lat, unv[i].coord.lon);
+                    if (d < dist) { dist = d;
+                        idx = i; }
+                }
+                route.push(unv[idx]);
+                cur = unv[idx].coord;
+                unv.splice(idx, 1);
+            }
+            return route;
+        }
+        async function planRoute() {
+            let addr = document.getElementById('startAddress').value.trim();
+            if (!addr) return showToast('Enter address');
+            if (selectedKiosks.size === 0) return showToast('Select assets');
+            let start = await geocode(addr);
+            if (!start) return showToast('Address not found');
+            let stops = [];
+            for (let sid of selectedKiosks) {
+                let k = allData.find(r => getStoreId(r) === sid);
+                if (k && k.Latitude && k.Longitude) stops.push({
+                    id: sid,
+                    name: k.Store,
+                    address: `${k.Address||''}, ${k.City||''}`,
+                    coord: { lat: parseFloat(k.Latitude), lon: parseFloat(k.Longitude) }
+                });
+            }
+            if (stops.length === 0) return showToast('No location data');
+            let opt = optimizeRoute(start, stops);
+            let totalDist = 0,
+                cur = start;
+            for (let s of opt) totalDist += haversine(cur.lat, cur.lon, s.coord.lat, s.coord.lon), cur = s.coord;
+            let minutes = (totalDist / 50) * 60;
+            currentRoute = { startAddress: addr, stops: opt };
+            document.getElementById('routeStats').innerHTML = `
+        <strong>${opt.length} stops</strong> · ${totalDist.toFixed(1)} km · ~${Math.round(minutes)} min<br>
+        Start: ${escapeHtml(addr)}`;
+            document.getElementById('routeStopsList').innerHTML = opt.map((s, i) =>
+                `<li>${escapeHtml(s.name)}<br><small>${escapeHtml(s.address)}</small></li>`).join('');
+            document.getElementById('routeSummary').style.display = 'block';
+        }
+
+        function openRouteInMaps() {
+            if (!currentRoute || !currentRoute.stops.length) return;
+            let waypoints = currentRoute.stops.slice(0, -1).map(s => s.address).join('|');
+            let lastStop = currentRoute.stops[currentRoute.stops.length - 1].address;
+            let url =
+                `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(currentRoute.startAddress)}&destination=${encodeURIComponent(lastStop)}`;
+            if (waypoints) url += `&waypoints=${encodeURIComponent(waypoints)}`;
+            window.open(url, '_blank');
+        }
+
+        function copyRoute() {
+            if (!currentRoute) return;
+            let txt = `Route: ${currentRoute.startAddress}\n`;
+            currentRoute.stops.forEach(s => txt += `- ${s.name}\n`);
+            navigator.clipboard.writeText(txt);
+            showToast('Copied');
+        }
+
+        // Executive PDF / screenshot
+        async function downloadExecutivePDF() {
+            showToast('Generating PDF...');
+            try {
+                const el = document.getElementById('dashboard');
+                const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#f4f6fc' });
+                const link = document.createElement('a');
+                link.download = `executive_report_${Date.now()}.png`;
+                link.href = canvas.toDataURL();
+                link.click();
+                showToast('Report saved');
+            } catch (e) { showToast('Failed'); }
+        }
+
+        function takeScreenshot() {
+            if (!allData.length) return showToast('No data');
+            showToast('Capturing…');
+            html2canvas(document.getElementById('dashboard')).then(canvas => {
+                const link = document.createElement('a');
+                link.download = `screenshot_${Date.now()}.png`;
+                link.href = canvas.toDataURL();
+                link.click();
+                showToast('Screenshot saved');
+            }).catch(() => showToast('Screenshot failed'));
+        }
+
+        // Event Listeners
+        document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('csvFile').click());
+        document.getElementById('showUploadBtn').addEventListener('click', () => document.getElementById('csvFile')
+        .click());
+        document.getElementById('csvFile').addEventListener('change', e => {
+            if (e.target.files && e.target.files[0]) {
+                const file = e.target.files[0];
+                if (file.name.endsWith('.csv')) {
+                    const reader = new FileReader();
+                    reader.onload = ev => {
+                        if (parseCSV(ev.target.result)) {
+                            document.getElementById('uploadCard').style.display = 'none';
+                            document.getElementById('dashboard').style.display = 'block';
+                            document.getElementById('actionButtons').style.display = 'flex';
+                            document.getElementById('dataTimestamp').innerHTML =
+                                `📅 Data as of: ${new Date().toLocaleString()} — ${allData.length} assets`;
+                            populateFilters();
+                            setupSorting();
+                            setupPriorityButtons();
+                            setMode('office');
+                            renderAll();
+                            showToast(`Loaded ${allData.length} assets`);
+                        } else showToast('Invalid CSV');
+                    };
+                    reader.readAsText(file, 'UTF-8');
+                } else showToast('Please upload a CSV file');
+            }
+        });
+        document.getElementById('qrBtn')?.addEventListener('click', () => {
+            document.getElementById('instructionModal').style.display = 'flex';
+            setTimeout(() => {
+                const q = document.getElementById('qrcode');
+                q.innerHTML = '';
+                new QRCode(q, { text: window.location.href, width: 180, height: 180 });
+            }, 100);
+        });
+        document.getElementById('snapshotBtn')?.addEventListener('click', takeScreenshot);
+        document.getElementById('downloadPdfBtn')?.addEventListener('click', downloadExecutivePDF);
+        document.getElementById('planRouteBtn')?.addEventListener('click', planRoute);
+        document.getElementById('openMapsBtn')?.addEventListener('click', openRouteInMaps);
+        document.getElementById('copyRouteBtn')?.addEventListener('click', copyRoute);
+        document.getElementById('selectAllCheckbox')?.addEventListener('change', selectAllKiosks);
+        window.closeModal = closeModal;
+        window.closeNotesModal = closeNotesModal;
     </script>
+
 </body>
 </html>
-"""
-
-@app.route('/')
-def home():
-    if 'session_id' not in session:
-        session['session_id'] = f"user_{int(time.time())}_{os.urandom(4).hex()}"
-    return render_template_string(
-        HTML_TEMPLATE,
-        bot_name=BOT_NAME,
-        session_id=session['session_id']
-    )
-
-@app.route('/ping')
-def ping():
-    return jsonify({'status': 'ok', 'bot_name': BOT_NAME, 'fusion': 'Cypher Fusion (Non-US)'})
-
-@app.route('/extract-image', methods=['POST'])
-def extract_image():
-    try:
-        data = request.json
-        file_content = data.get('file', '')
-        file_name = data.get('name', 'image.jpg')
-        result = extract_text_from_image(file_content, file_name)
-        return jsonify({'text': result})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/extract-pdf', methods=['POST'])
-def extract_pdf():
-    try:
-        data = request.json
-        file_content = data.get('file', '')
-        file_name = data.get('name', 'file.pdf')
-        pdf_bytes = base64.b64decode(file_content)
-        from io import BytesIO
-        pdf_file = BytesIO(pdf_bytes)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        if not text.strip():
-            text = "No text could be extracted from this PDF."
-        return jsonify({'text': text})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/chat', methods=['POST'])
-def chat():
-    global total_tokens_used, total_cost_usd
-    data = request.json
-    user_message = data.get('message', '').strip()
-    session_id = data.get('session', session.get('session_id', 'default'))
-    personality = data.get('personality', 'default')
-    web_search = data.get('web_search', True)
-    fusion_preset = data.get('fusion_preset', 'cypher_max')
-    file_content = data.get('file_content', '')
-    file_name = data.get('file_name', '')
-
-    if not user_message:
-        return jsonify({'error': 'No case presented.'}), 400
-
-    if session_id not in chat_histories:
-        chat_histories[session_id] = []
-
-    history = chat_histories[session_id]
-    personality_prompt = PERSONALITIES.get(personality, PERSONALITIES['default'])
-    
-    if file_content:
-        personality_prompt += f"\n\nThe user submitted evidence named '{file_name}' with this content:\n\n{file_content[:6000]}\n\nUse this as evidence. If it's irrelevant, state that plainly."
-
-    messages = [
-        {"role": "system", "content": personality_prompt},
-        {"role": "system", "content": "You are Cypher. Deliver one definitive ruling. No hedging. No check again. Just the verdict."},
-        {"role": "system", "content": "If you're uncertain, state your confidence as a percentage. If you don't know, say I don't know."}
-    ]
-    messages.extend(history[-6:])
-    messages.append({"role": "user", "content": user_message})
-
-    preset = CYPHER_PRESETS.get(fusion_preset, CYPHER_PRESETS["cypher_max"])
-    
-    try:
-        payload = {
-            "model": "openrouter/fusion",
-            "plugins": [{
-                "id": "fusion",
-                "analysis_models": preset["panel"],
-                "model": preset["judge"]
-            }],
-            "messages": messages,
-            "temperature": 0.15,
-            "max_tokens": 500,
-            "top_p": 0.85,
-        }
-        if web_search:
-            payload["tools"] = [{"type": "openrouter:web_search"}]
-
-        response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {YOUR_API_KEY}",
-                "Content-Type": "application/json",
-                "X-OpenRouter-Cache": "true",
-            },
-            json=payload,
-            timeout=60
-        )
-
-        if response.status_code != 200:
-            error_msg = response.json().get('error', {}).get('message', 'API error')
-            return jsonify({'error': f'Cypher Fusion Error: {error_msg}'})
-
-        result = response.json()
-        if not result or 'choices' not in result or not result['choices']:
-            return jsonify({'error': 'Cypher gave no ruling.'})
-        
-        bot_reply = result['choices'][0]['message']['content']
-        if not bot_reply:
-            return jsonify({'error': 'No verdict generated.'})
-        
-        bot_reply = clean_claude_hedging(bot_reply)
-        if not bot_reply.startswith(("Verdict:", "Ruling:", "Confidence:", "I don't know")):
-            bot_reply = f"Ruling: {bot_reply}"
-        
-        html_reply = markdown.markdown(bot_reply, extensions=['tables', 'fenced_code'])
-        html_reply = bleach.clean(html_reply, strip=True)
-        
-        usage = result.get('usage', {})
-        total_tokens_used += usage.get('total_tokens', 0)
-        total_cost_usd += 0.0001
-        
-        message_id = f"{session_id}_{int(time.time())}_{len(history)}"
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": bot_reply})
-        if len(history) > 12:
-            history = history[-12:]
-            chat_histories[session_id] = history
-        
-        preset_name = preset["name"].split(" ")[0] + " " + preset["name"].split(" ")[1] if len(preset["name"].split(" ")) > 1 else preset["name"]
-        return jsonify({
-            'reply': bot_reply,
-            'html_reply': html_reply,
-            'message_id': message_id,
-            'preset_used': preset_name,
-            'score': preset["score"]
-        })
-    except requests.exceptions.Timeout:
-        return jsonify({'error': 'Cypher Fusion timed out.'})
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-@app.route('/feedback', methods=['POST'])
-def feedback():
-    try:
-        data = request.json
-        message_id = data.get('message_id')
-        value = data.get('value')
-        if not message_id or value not in [1, -1]:
-            return jsonify({'error': 'Invalid feedback'}), 400
-        if 'feedback_data' not in chat_histories:
-            chat_histories['feedback_data'] = {}
-        chat_histories['feedback_data'][message_id] = value
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/clear', methods=['POST'])
-def clear():
-    session_id = request.json.get('session', session.get('session_id', 'default'))
-    if session_id in chat_histories:
-        chat_histories[session_id] = []
-    return jsonify({'status': 'ok'})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, threaded=True)
