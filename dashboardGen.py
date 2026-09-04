@@ -9,13 +9,12 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fleet Intelligence Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <title>Fleet Intelligence</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -60,7 +59,6 @@ HTML_TEMPLATE = """
         }
         @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 100% { opacity: 0.3; transform: scale(1.3); } }
         .hero-left .subtitle { color: #b9c8e0; margin-top: 8px; font-size: 0.95rem; }
-        .hero-left .creator { color: #8899bb; font-size: 0.75rem; margin-top: 4px; }
         .hero-right { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .hero-btn {
             background: rgba(255,255,255,0.12);
@@ -95,6 +93,7 @@ HTML_TEMPLATE = """
             cursor: pointer;
             display: inline-block;
             transition: 0.2s;
+            font-size: 1.2rem;
         }
         .upload-button:hover { background: #e0e7ff; border-color: #4a5b6e; }
         #dashboard { display: none; }
@@ -111,13 +110,10 @@ HTML_TEMPLATE = """
             border: 1px solid #eef2f8;
             text-align: center;
             box-shadow: 0 6px 14px rgba(0,0,0,0.03);
-            transition: 0.2s;
         }
-        .kpi-card:hover { transform: translateY(-3px); box-shadow: 0 12px 24px rgba(0,0,0,0.06); }
-        .kpi-label { font-size: 11px; color: #64748b; text-transform: uppercase; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 4px; }
+        .kpi-label { font-size: 11px; color: #64748b; text-transform: uppercase; margin-bottom: 6px; }
         .kpi-value { font-size: 28px; font-weight: 800; color: #1e293b; }
         .kpi-loss { color: #dc2626; }
-        .kpi-green { color: #10b981; }
         .filters {
             display: flex;
             flex-wrap: wrap;
@@ -167,10 +163,9 @@ HTML_TEMPLATE = """
             border-bottom: 2px solid #e2e8f0;
             position: sticky;
             top: 0;
-            white-space: nowrap;
             text-align: left;
         }
-        td { padding: 10px 10px; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
+        td { padding: 10px 10px; border-bottom: 1px solid #f1f5f9; }
         .critical-row { background-color: #fee2e2; }
         .warning-row { background-color: #fef3c7; }
         .good-row { background-color: #dcfce7; }
@@ -185,9 +180,6 @@ HTML_TEMPLATE = """
         .badge-warning { background: #f59e0b; color: white; }
         .badge-good { background: #10b981; color: white; }
         .badge-offline { background: #6b7280; color: white; }
-        .badge-high { background: #dc2626; color: white; }
-        .badge-mid { background: #f59e0b; color: white; }
-        .badge-low { background: #10b981; color: white; }
         .map-container {
             background: white;
             border-radius: 24px;
@@ -206,7 +198,6 @@ HTML_TEMPLATE = """
             color: white;
             padding: 12px 24px;
             border-radius: 48px;
-            font-size: 13px;
             z-index: 1000;
             display: none;
             box-shadow: 0 8px 16px rgba(0,0,0,0.2);
@@ -219,7 +210,6 @@ HTML_TEMPLATE = """
             cursor: pointer;
             font-size: 12px;
         }
-        .call-btn:hover { background: #cbd5e1; }
         @media (max-width: 768px) {
             .hero-header { flex-direction: column; text-align: center; }
             .kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -241,7 +231,6 @@ HTML_TEMPLATE = """
                 <span class="live-pulse">LIVE</span>
             </h1>
             <div class="subtitle">Real-time asset performance & predictive analytics</div>
-            <div class="creator">Built by <strong>You</strong> — Fleet Intelligence Platform</div>
         </div>
         <div class="hero-right">
             <button class="hero-btn" id="uploadBtn"><i class="fas fa-upload"></i> Upload CSV</button>
@@ -266,10 +255,8 @@ HTML_TEMPLATE = """
 
     <!-- Dashboard -->
     <div id="dashboard">
-
         <div id="dataTimestamp" style="background:#eef2ff; padding:6px 16px; border-radius:20px; display:inline-block; margin-bottom:20px;"></div>
 
-        <!-- KPI Grid -->
         <div class="kpi-grid" id="kpiGrid">
             <div class="kpi-card"><div class="kpi-label">📊 Total Assets</div><div class="kpi-value" id="kpiTotal">0</div></div>
             <div class="kpi-card"><div class="kpi-label">🔴 Critical</div><div class="kpi-value" id="kpiCritical" style="color:#dc2626;">0</div></div>
@@ -277,53 +264,22 @@ HTML_TEMPLATE = """
             <div class="kpi-card"><div class="kpi-label">💸 Daily Loss</div><div class="kpi-value kpi-loss" id="kpiLoss">$0</div></div>
         </div>
 
-        <!-- Filters -->
         <div class="filters">
-            <div class="filter-group">
-                <label>Region</label>
-                <select id="regionFilter"><option value="all">All</option></select>
-            </div>
-            <div class="filter-group">
-                <label>Status</label>
-                <select id="statusFilter">
-                    <option value="all">All</option>
-                    <option value="critical">Critical</option>
-                    <option value="warning">Warning</option>
-                    <option value="good">Good</option>
-                    <option value="offline">Offline</option>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Search</label>
-                <input type="text" id="searchInput" placeholder="Search assets...">
-            </div>
+            <div class="filter-group"><label>Region</label><select id="regionFilter"><option value="all">All</option></select></div>
+            <div class="filter-group"><label>Status</label><select id="statusFilter"><option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="good">Good</option><option value="offline">Offline</option></select></div>
+            <div class="filter-group"><label>Search</label><input type="text" id="searchInput" placeholder="Search assets..."></div>
             <button id="resetBtn" class="reset-btn"><i class="fas fa-undo"></i> Reset</button>
         </div>
 
-        <!-- Table -->
         <div class="table-wrapper">
             <table id="dataTable">
                 <thead>
-                    <tr>
-                        <th>Asset</th>
-                        <th>Address</th>
-                        <th>City</th>
-                        <th>Region</th>
-                        <th>Status</th>
-                        <th>Volume</th>
-                        <th>Reject%</th>
-                        <th>Uptime%</th>
-                        <th>Est. Revenue</th>
-                        <th>Daily Loss</th>
-                        <th>Service Days</th>
-                        <th>Call</th>
-                    </tr>
+                    <tr><th>Asset</th><th>Address</th><th>City</th><th>Region</th><th>Status</th><th>Volume</th><th>Reject%</th><th>Uptime%</th><th>Est. Revenue</th><th>Daily Loss</th><th>Service Days</th><th>Call</th></tr>
                 </thead>
                 <tbody id="tableBody"></tbody>
             </table>
         </div>
 
-        <!-- Map -->
         <div class="map-container">
             <h3><i class="fas fa-map-pin"></i> Asset Location Map</h3>
             <div id="map"></div>
@@ -334,26 +290,17 @@ HTML_TEMPLATE = """
                 <span><span class="map-legend-dot" style="background:#6b7280;"></span> Offline</span>
             </div>
         </div>
-
     </div>
-
 </div>
 
 <div id="toast" class="toast"></div>
 
 <script>
-    // ============================================================
-    // FLEET INTELLIGENCE DASHBOARD - GENERIC VERSION
-    // ============================================================
-
     let allData = [];
     let currentSort = { column: 'loss', direction: 'desc' };
     let map = null;
-    let lossChart = null;
-
     const TRANSACTION_VALUE = 5;
 
-    // ===== HELPERS =====
     function showToast(msg) {
         let t = document.getElementById('toast');
         t.textContent = msg;
@@ -379,11 +326,8 @@ HTML_TEMPLATE = """
     }
 
     function getVolume(r) { return parseFloat(r.Tx1Day) || 0; }
-
     function getReject(r) { return parseFloat(r.Reject7Day) || 0; }
-
     function getUptime(r) { return parseFloat(r.Uptime7Day) || 100; }
-
     function getEstRevenue(r) { return getVolume(r) * TRANSACTION_VALUE; }
 
     function calcLoss(r) {
@@ -412,9 +356,8 @@ HTML_TEMPLATE = """
 
     function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[m]); }
 
-    // ===== CSV PARSING =====
     function parseCSV(text) {
-        const lines = text.split(/\r?\n/);
+        const lines = text.split(/\\r?\\n/);
         if (lines.length < 2) return false;
         let headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
         let data = [];
@@ -451,7 +394,6 @@ HTML_TEMPLATE = """
         return true;
     }
 
-    // ===== FILTERS =====
     function filterData() {
         let f = [...allData];
         let region = document.getElementById('regionFilter')?.value || 'all';
@@ -469,27 +411,11 @@ HTML_TEMPLATE = """
 
     function sortData(d) {
         return [...d].sort((a, b) => {
-            let va, vb;
-            switch (currentSort.column) {
-                case 'store': va = (a.Store || '').toLowerCase(); vb = (b.Store || '').toLowerCase(); break;
-                case 'address': va = (a.Address || '').toLowerCase(); vb = (b.Address || '').toLowerCase(); break;
-                case 'city': va = (a.City || '').toLowerCase(); vb = (b.City || '').toLowerCase(); break;
-                case 'region': va = getRegion(a); vb = getRegion(b); break;
-                case 'status': va = getStatus(a); vb = getStatus(b); break;
-                case 'volume': va = getVolume(a); vb = getVolume(b); break;
-                case 'reject': va = getReject(a); vb = getReject(b); break;
-                case 'uptime': va = getUptime(a); vb = getUptime(b); break;
-                case 'revenue': va = getEstRevenue(a); vb = getEstRevenue(b); break;
-                case 'loss': va = calcLoss(a); vb = calcLoss(b); break;
-                case 'serviceDays': va = getDaysSinceService(a) || 999; vb = getDaysSinceService(b) || 999; break;
-                default: va = calcLoss(a); vb = calcLoss(b);
-            }
-            if (typeof va === 'number') return currentSort.direction === 'desc' ? vb - va : va - vb;
-            return currentSort.direction === 'desc' ? String(vb).localeCompare(String(va)) : String(va).localeCompare(String(vb));
+            let va = calcLoss(a), vb = calcLoss(b);
+            return currentSort.direction === 'desc' ? vb - va : va - vb;
         });
     }
 
-    // ===== RENDER =====
     function renderAll() {
         if (!allData.length) return;
         let f = filterData();
@@ -498,7 +424,6 @@ HTML_TEMPLATE = """
         const total = f.length;
         const crit = f.filter(r => getStatus(r) === 'Critical').length;
         const warn = f.filter(r => getStatus(r) === 'Warning').length;
-        const offline = f.filter(r => getStatus(r) === 'Offline').length;
         const tLoss = f.reduce((s, r) => s + calcLoss(r), 0);
 
         document.getElementById('kpiTotal').textContent = total;
@@ -541,7 +466,6 @@ HTML_TEMPLATE = """
         populateFilters();
     }
 
-    // ===== MAP =====
     function updateMap(data) {
         if (map) map.remove();
         map = L.map('map').setView([56.1304, -106.3468], 4);
@@ -564,7 +488,6 @@ HTML_TEMPLATE = """
         setTimeout(() => map.invalidateSize(), 100);
     }
 
-    // ===== FILTERS SETUP =====
     function populateFilters() {
         if (!allData.length) return;
         const regions = [...new Set(allData.map(r => getRegion(r)))].filter(r => r && r !== 'Unknown');
@@ -574,8 +497,52 @@ HTML_TEMPLATE = """
         if ([...sel.options].some(o => o.value === current)) sel.value = current;
     }
 
-    // ===== SCREENSHOT =====
-    function takeScreenshot() {
+    // ===== FILE UPLOAD - WORKS =====
+    document.getElementById('uploadBtn').addEventListener('click', function() {
+        document.getElementById('csvFile').click();
+    });
+
+    document.getElementById('uploadBtn2').addEventListener('click', function() {
+        document.getElementById('csvFile').click();
+    });
+
+    document.getElementById('csvFile').addEventListener('change', function(e) {
+        if (!e.target.files || !e.target.files[0]) return;
+        const file = e.target.files[0];
+        document.getElementById('fileStatus').textContent = 'Loading: ' + file.name;
+        if (!file.name.endsWith('.csv')) {
+            showToast('Please upload a CSV file');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = function(ev) {
+            if (parseCSV(ev.target.result)) {
+                document.getElementById('uploadCard').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+                document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
+                populateFilters();
+                renderAll();
+                showToast('Loaded ' + allData.length + ' assets');
+            } else {
+                showToast('Invalid CSV format');
+            }
+        };
+        reader.readAsText(file);
+    });
+
+    // ===== OTHER EVENTS =====
+    document.getElementById('resetBtn').addEventListener('click', function() {
+        document.getElementById('regionFilter').value = 'all';
+        document.getElementById('statusFilter').value = 'all';
+        document.getElementById('searchInput').value = '';
+        renderAll();
+    });
+
+    document.getElementById('searchInput').addEventListener('input', renderAll);
+    document.getElementById('regionFilter').addEventListener('change', renderAll);
+    document.getElementById('statusFilter').addEventListener('change', renderAll);
+
+    document.getElementById('screenshotBtn').addEventListener('click', function() {
         if (!allData.length) return showToast('No data');
         showToast('Capturing...');
         html2canvas(document.getElementById('dashboard')).then(canvas => {
@@ -585,10 +552,9 @@ HTML_TEMPLATE = """
             link.click();
             showToast('Screenshot saved');
         }).catch(() => showToast('Failed'));
-    }
+    });
 
-    // ===== REPORT =====
-    function downloadReport() {
+    document.getElementById('reportBtn').addEventListener('click', function() {
         if (!allData.length) return showToast('No data');
         showToast('Generating report...');
         html2canvas(document.getElementById('dashboard'), { scale: 2, backgroundColor: '#f4f6fc' }).then(canvas => {
@@ -598,87 +564,10 @@ HTML_TEMPLATE = """
             link.click();
             showToast('Report saved');
         }).catch(() => showToast('Failed'));
-    }
-
-    // ===== SORTING =====
-    function setupSorting() {
-        document.querySelectorAll('#dataTable th').forEach(th => {
-            const key = th.textContent.trim().toLowerCase();
-            const map = {
-                'asset': 'store', 'address': 'address', 'city': 'city', 'region': 'region',
-                'status': 'status', 'volume': 'volume', 'reject%': 'reject', 'uptime%': 'uptime',
-                'est. revenue': 'revenue', 'daily loss': 'loss', 'service days': 'serviceDays'
-            };
-            const sortKey = map[key] || null;
-            if (!sortKey) return;
-            th.style.cursor = 'pointer';
-            th.title = 'Click to sort';
-            th.addEventListener('click', () => {
-                if (currentSort.column === sortKey) currentSort.direction = currentSort.direction === 'desc' ? 'asc' : 'desc';
-                else { currentSort.column = sortKey; currentSort.direction = 'desc'; }
-                renderAll();
-            });
-        });
-    }
-
-    // ============================================================
-    // FILE UPLOAD - FIXED
-    // ============================================================
-    document.addEventListener('DOMContentLoaded', function() {
-
-        // Both upload buttons trigger the same hidden file input
-        document.getElementById('uploadBtn').addEventListener('click', function() {
-            document.getElementById('csvFile').click();
-        });
-
-        document.getElementById('uploadBtn2').addEventListener('click', function() {
-            document.getElementById('csvFile').click();
-        });
-
-        document.getElementById('csvFile').addEventListener('change', function(e) {
-            if (!e.target.files || !e.target.files[0]) return;
-            const file = e.target.files[0];
-            document.getElementById('fileStatus').textContent = 'Loading: ' + file.name;
-            if (!file.name.endsWith('.csv')) {
-                showToast('Please upload a CSV file');
-                return;
-            }
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                if (parseCSV(ev.target.result)) {
-                    document.getElementById('uploadCard').style.display = 'none';
-                    document.getElementById('dashboard').style.display = 'block';
-                    document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets';
-                    populateFilters();
-                    setupSorting();
-                    renderAll();
-                    showToast('Loaded ' + allData.length + ' assets');
-                } else {
-                    showToast('Invalid CSV format');
-                }
-            };
-            reader.readAsText(file);
-        });
-
-        document.getElementById('resetBtn').addEventListener('click', function() {
-            document.getElementById('regionFilter').value = 'all';
-            document.getElementById('statusFilter').value = 'all';
-            document.getElementById('searchInput').value = '';
-            renderAll();
-        });
-
-        document.getElementById('searchInput').addEventListener('input', renderAll);
-        document.getElementById('regionFilter').addEventListener('change', renderAll);
-        document.getElementById('statusFilter').addEventListener('change', renderAll);
-
-        document.getElementById('screenshotBtn').addEventListener('click', takeScreenshot);
-        document.getElementById('reportBtn').addEventListener('click', downloadReport);
-
-        console.log('Fleet Intelligence Dashboard loaded');
     });
 
+    console.log('Fleet Intelligence Dashboard loaded');
 </script>
-
 </body>
 </html>
 """
